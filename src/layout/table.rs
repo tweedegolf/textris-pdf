@@ -6,7 +6,7 @@ use krilla::color::rgb;
 use crate::{
     fonts::Style,
     layout::{Element, Engine},
-    model::{Inline, Table, plain_text},
+    model::{Cell, Table},
     theme::{Align, ColumnWidth, ColumnWidths, TableStyle},
 };
 
@@ -16,7 +16,6 @@ pub(super) struct RowStyle<'a> {
     italic: bool,
     fill: Option<rgb::Color>,
     flush_first_column: bool,
-    fill_in_blanks: bool,
     align: &'a [Align],
     size: f32,
     row_min_height: f32,
@@ -42,7 +41,6 @@ impl Engine<'_> {
             italic: style.header_italic,
             fill: None,
             flush_first_column: style.flush_first_column,
-            fill_in_blanks: style.fill_in_blanks,
             align: &style.align,
             size: self.table_font_size(style),
             row_min_height: style
@@ -65,11 +63,7 @@ impl Engine<'_> {
     fn table_setup(&self, table: &Table, width: f32) -> (Vec<f32>, usize, bool) {
         let columns = table.columns();
         let widths = self.column_widths(table, columns, width);
-        let has_header = table.style.header
-            && !table
-                .headers
-                .iter()
-                .all(|c| plain_text(c).trim().is_empty());
+        let has_header = table.style.header && !table.headers.iter().all(Cell::is_blank);
         (widths, columns, has_header)
     }
 
@@ -255,23 +249,31 @@ impl Engine<'_> {
     }
 
     /// The `(min, natural)` content widths of a column across header and body:
-    /// the widest single unbreakable word, and the widest cell with everything
-    /// on one line.
+    /// the widest single unbreakable word, and the widest cell with each of
+    /// its (hard-break-separated) lines unwrapped.
     fn column_metrics(&self, table: &Table, column: usize) -> (f32, f32) {
         let size = self.table_font_size(&table.style);
         let mut min = 0.0_f32;
         let mut natural = 0.0_f32;
-        let mut consider = |cell: &[Inline], italic: bool| {
-            let words = self.tokenize(cell, false, italic, size);
-            let mut cell_width = 0.0;
-            for (i, word) in words.iter().enumerate() {
-                if i > 0 {
-                    cell_width += self.fonts.space_width(word.style, size);
+        let mut consider = |cell: &Cell, italic: bool| {
+            let words = self.tokenize(cell.inlines(), false, italic, size);
+            let mut line_width = 0.0;
+            let mut first = true;
+            for word in &words {
+                if word.hard_break {
+                    natural = natural.max(line_width);
+                    line_width = 0.0;
+                    first = true;
+                    continue;
                 }
-                cell_width += word.width;
+                if !first {
+                    line_width += self.fonts.space_width(word.style, size);
+                }
+                line_width += word.width;
                 min = min.max(word.width);
+                first = false;
             }
-            natural = natural.max(cell_width);
+            natural = natural.max(line_width);
         };
         if let Some(cell) = table.headers.get(column) {
             consider(cell, table.style.header_italic);
@@ -291,23 +293,22 @@ impl Engine<'_> {
         self.column_metrics(table, column).0
     }
 
-    /// Height of a row: the tallest wrapped cell, clamped to a minimum, plus
-    /// vertical insets.
-    fn row_height(
-        &self,
-        cells: &[Vec<Inline>],
-        widths: &[f32],
-        columns: usize,
-        style: &RowStyle,
-    ) -> f32 {
+    /// Height of a row: the tallest wrapped cell, clamped to a minimum (the
+    /// style's, or any spacer cell's height), plus vertical insets.
+    fn row_height(&self, cells: &[Cell], widths: &[f32], columns: usize, style: &RowStyle) -> f32 {
         let body = style.size;
         let line_h = body * self.theme.spacing.line_height;
         let mut content = style.row_min_height;
         #[allow(clippy::needless_range_loop)] // reads parallel per-column arrays
         for c in 0..columns {
+            let cell = cells.get(c);
+            if let Some(Cell::Spacer(height)) = cell {
+                content = content.max(*height);
+                continue;
+            }
             let avail = self.cell_available_width(widths[c], c, style);
             let words = self.tokenize(
-                cells.get(c).map(Vec::as_slice).unwrap_or(&[]),
+                cell.map(Cell::inlines).unwrap_or(&[]),
                 false,
                 style.italic,
                 body,
@@ -323,7 +324,7 @@ impl Engine<'_> {
     #[allow(clippy::too_many_arguments)]
     fn emit_row(
         &mut self,
-        cells: &[Vec<Inline>],
+        cells: &[Cell],
         xs: &[f32],
         widths: &[f32],
         columns: usize,
@@ -350,11 +351,12 @@ impl Engine<'_> {
         let inset_y = self.theme.table.inset_y;
         let text_color = self.theme.palette.text;
         for c in 0..columns {
-            let cell = cells.get(c).map(Vec::as_slice).unwrap_or(&[]);
-            if cell.is_empty() {
-                if style.fill_in_blanks && c > 0 {
+            let inset_left = self.cell_inset_left(c, style);
+            let cell = match cells.get(c) {
+                Some(Cell::FillIn) => {
+                    // A fill-in line along the cell's bottom inset.
                     let y = top + height - inset_y;
-                    let x0 = xs[c] + inset_x;
+                    let x0 = xs[c] + inset_left;
                     let x1 = xs[c] + widths[c] - inset_x;
                     self.push(Element::Stroke {
                         points: vec![(x0, y), (x1, y)],
@@ -362,10 +364,14 @@ impl Engine<'_> {
                         color: text_color,
                         closed: false,
                     });
+                    continue;
                 }
+                Some(Cell::Text(inlines)) => inlines.as_slice(),
+                Some(Cell::Blank | Cell::Spacer(_)) | None => continue,
+            };
+            if cell.is_empty() {
                 continue;
             }
-            let inset_left = self.cell_inset_left(c, style);
             let avail = self.cell_available_width(widths[c], c, style);
             let words = self.tokenize(cell, false, style.italic, body);
             let lines = self.wrap(words, avail, body);

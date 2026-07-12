@@ -4,10 +4,7 @@
 
 use krilla::color::rgb;
 
-use crate::{
-    model::{Inline, SectionContent},
-    theme::Palette,
-};
+use crate::model::{Cell, Inline, InlineColor, SectionContent};
 
 /// A rich-text fragment: an ordered sequence of styled runs.
 ///
@@ -40,7 +37,7 @@ impl Text {
         bold: bool,
         italic: bool,
         mono: bool,
-        color: Option<rgb::Color>,
+        color: Option<InlineColor>,
     ) -> Self {
         self.runs.push(Inline {
             text: text.into(),
@@ -48,6 +45,7 @@ impl Text {
             italic,
             mono,
             color,
+            section_ref: None,
         });
         self
     }
@@ -79,14 +77,32 @@ impl Text {
 
     /// Append a run in a specific color.
     pub fn colored(self, text: impl Into<String>, color: rgb::Color) -> Self {
-        self.push_run(text, false, false, false, Some(color))
+        self.push_run(text, false, false, false, Some(InlineColor::Rgb(color)))
     }
 
-    /// Append a muted (gray) run, using the default palette's muted color. To
-    /// match a custom [`Theme`](crate::theme::Theme)'s muted color, pass it
-    /// explicitly via [`colored`](Self::colored).
+    /// Append a muted (secondary) run. The concrete color is the document
+    /// theme's [`Palette::muted`](crate::theme::Palette::muted), resolved when
+    /// the document is laid out, so it follows a custom theme automatically.
     pub fn muted(self, text: impl Into<String>) -> Self {
-        self.colored(text, Palette::default().muted)
+        self.push_run(text, false, false, false, Some(InlineColor::Muted))
+    }
+
+    /// Append a hard line break: the following text starts on a new line
+    /// without ending the paragraph. Equivalent to a `'\n'` in the text, which
+    /// is honored anywhere text is laid out (paragraphs, cells, lists).
+    pub fn line_break(self) -> Self {
+        self.normal("\n")
+    }
+
+    /// Append a placeholder run that resolves to the number of the section
+    /// labeled `label` (see [`Textris::anchor`](crate::build::Textris::anchor))
+    /// when the document is built. An unknown label renders as `??`.
+    pub fn section_ref(mut self, label: impl Into<String>) -> Self {
+        self.runs.push(Inline {
+            section_ref: Some(label.into()),
+            ..Inline::new("??")
+        });
+        self
     }
 }
 
@@ -110,9 +126,15 @@ pub fn mono(t: impl Into<String>) -> Text {
     Text::new().mono(t)
 }
 
-/// A single muted (gray) fragment.
+/// A single muted (secondary-color) fragment.
 pub fn muted(t: impl Into<String>) -> Text {
     Text::new().muted(t)
+}
+
+/// A fragment that resolves to the number of the section labeled `label`
+/// (see [`Textris::anchor`](crate::build::Textris::anchor)).
+pub fn section_ref(label: impl Into<String>) -> Text {
+    Text::new().section_ref(label)
 }
 
 /// Anything that can be turned into a run of styled [`Inline`]s.
@@ -154,6 +176,60 @@ impl IntoText for Vec<Inline> {
     }
 }
 
+/// Anything that can be turned into a table [`Cell`].
+///
+/// Implemented for every [`IntoText`] type (a text cell) and for [`Cell`]
+/// itself, so table rows accept plain strings, rich [`Text`], and the special
+/// cells from [`cell`], [`fill_in`], [`blank`] and [`spacer`]. Because array
+/// literals must be homogeneous, wrap every cell of a mixed row in a helper,
+/// e.g. `[cell("Date"), fill_in()]`.
+pub trait IntoCell {
+    fn into_cell(self) -> Cell;
+}
+
+impl IntoCell for Cell {
+    fn into_cell(self) -> Cell {
+        self
+    }
+}
+
+macro_rules! impl_into_cell_via_text {
+    ($($ty:ty),+) => {$(
+        impl IntoCell for $ty {
+            fn into_cell(self) -> Cell {
+                Cell::Text(self.into_inlines())
+            }
+        }
+    )+};
+}
+
+impl_into_cell_via_text!(Text, &str, String, Inline, Vec<Inline>);
+
+/// A text table cell. Useful to make a mixed row's element type uniform:
+/// `[cell("Date"), fill_in()]`.
+pub fn cell(t: impl IntoText) -> Cell {
+    Cell::Text(t.into_inlines())
+}
+
+/// An empty table cell with a fill-in line along its bottom (a blank form
+/// field).
+pub fn fill_in() -> Cell {
+    Cell::FillIn
+}
+
+/// A deliberately empty table cell: nothing is drawn.
+pub fn blank() -> Cell {
+    Cell::Blank
+}
+
+/// An empty table cell that forces its row to be at least `height` points
+/// tall, e.g. a roomy signature field. See also
+/// [`Textris::spacer`](crate::build::Textris::spacer) for vertical space
+/// between blocks.
+pub fn spacer(height: f32) -> Cell {
+    Cell::Spacer(height)
+}
+
 /// Drop empty runs and merge adjacent runs that share styling, so the layout
 /// engine sees clean, minimal input.
 fn normalize(inlines: Vec<Inline>) -> Vec<Inline> {
@@ -167,7 +243,11 @@ fn normalize(inlines: Vec<Inline>) -> Vec<Inline> {
                 if last.bold == run.bold
                     && last.italic == run.italic
                     && last.mono == run.mono
-                    && last.color == run.color =>
+                    && last.color == run.color
+                    // Section references are placeholders whose text is
+                    // replaced at resolution; never merge them.
+                    && last.section_ref.is_none()
+                    && run.section_ref.is_none() =>
             {
                 last.text.push_str(&run.text);
             }

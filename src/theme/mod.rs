@@ -14,6 +14,10 @@ mod style;
 
 pub use style::{Align, BoxStyle, ColumnWidth, ColumnWidths, TableStyle};
 
+/// The RGB color type used throughout the theme and text APIs, re-exported
+/// from krilla (also available as [`crate::Color`]).
+pub use krilla::color::rgb::Color;
+
 use krilla::color::rgb;
 
 /// One centimeter expressed in points.
@@ -36,12 +40,12 @@ pub const fn em(value: f32) -> f32 {
 /// and change what you need:
 ///
 /// ```
-/// use textris_pdf::theme::Theme;
-/// use krilla::color::rgb;
+/// use textris_pdf::{Color, theme::Theme};
 ///
 /// let mut theme = Theme::default();
-/// theme.palette.highlight = rgb::Color::new(0xEE, 0xF4, 0xFF); // bluer stripes
-/// theme.spacing.line_height = 1.5;                             // looser leading
+/// theme.palette.highlight = Color::new(0xEE, 0xF4, 0xFF); // bluer stripes
+/// theme.spacing.line_height = 1.5;                        // looser leading
+/// theme.spacing.heading_above.h3 = 12.0;                  // tighter sections
 /// ```
 #[derive(Debug, Clone, Default)]
 pub struct Theme {
@@ -164,10 +168,10 @@ impl FontSizes {
 /// Vertical spacing between blocks, tuned for a consistent vertical rhythm.
 #[derive(Debug, Clone)]
 pub struct Spacing {
-    /// Space above a section heading.
-    pub heading_above: f32,
-    /// Space below a section heading (before its content).
-    pub heading_below: f32,
+    /// Space above a heading, per heading level.
+    pub heading_above: HeadingSpacing,
+    /// Space below a heading (before its content), per heading level.
+    pub heading_below: HeadingSpacing,
     /// Space between ordinary blocks (paragraphs, tables, lists).
     pub block: f32,
     /// Leading multiplier: baseline-to-baseline distance as a factor of font size.
@@ -182,11 +186,59 @@ pub struct Spacing {
 impl Default for Spacing {
     fn default() -> Self {
         Self {
-            heading_above: em(2.0),
-            heading_below: em(0.75),
+            heading_above: HeadingSpacing {
+                h1: em(3.0),
+                h2: em(2.5),
+                h3: em(2.0),
+                h4: em(1.75),
+                h5: em(1.5),
+            },
+            heading_below: HeadingSpacing {
+                h1: em(1.25),
+                h2: em(1.0),
+                h3: em(0.75),
+                h4: em(0.75),
+                h5: em(0.75),
+            },
             block: em(0.75),
             line_height: 1.35,
             keep_together_max_fraction: 0.5,
+        }
+    }
+}
+
+/// A vertical distance defined per heading level, so top-level headings can get
+/// more air than subsections. Levels beyond 5 use the level-5 value.
+#[derive(Debug, Clone)]
+pub struct HeadingSpacing {
+    pub h1: f32,
+    pub h2: f32,
+    pub h3: f32,
+    pub h4: f32,
+    pub h5: f32,
+}
+
+impl HeadingSpacing {
+    /// The same distance for every heading level.
+    pub const fn uniform(value: f32) -> Self {
+        Self {
+            h1: value,
+            h2: value,
+            h3: value,
+            h4: value,
+            h5: value,
+        }
+    }
+
+    /// The distance for a heading at `level` (levels beyond 5 share the
+    /// level-5 value).
+    pub fn level(&self, level: u8) -> f32 {
+        match level {
+            1 => self.h1,
+            2 => self.h2,
+            3 => self.h3,
+            4 => self.h4,
+            _ => self.h5,
         }
     }
 }

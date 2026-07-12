@@ -33,13 +33,17 @@ pub fn layout(document: &Document, fonts: &Fonts) -> Vec<Page> {
 /// Which spacing rule applies before a block.
 #[derive(Clone, Copy, PartialEq)]
 enum Kind {
-    Heading,
+    /// A heading at the given level.
+    Heading(u8),
+    /// A fixed spacer, which suppresses the gaps around it.
+    Spacer,
     Other,
 }
 
 fn kind_of(block: &Block) -> Kind {
     match block {
-        Block::Heading { .. } => Kind::Heading,
+        Block::Heading { level, .. } => Kind::Heading(*level),
+        Block::Spacer(_) => Kind::Spacer,
         _ => Kind::Other,
     }
 }
@@ -106,10 +110,20 @@ impl<'a> Engine<'a> {
         let spacing = &self.theme.spacing;
         match (prev, cur) {
             (None, _) => 0.0,
-            (Some(Kind::Heading), Kind::Heading) => 0.0,
-            (_, Kind::Heading) => spacing.heading_above,
-            (Some(Kind::Heading), _) => spacing.heading_below,
+            // A spacer *is* the gap between its neighbours.
+            (Some(Kind::Spacer), _) | (_, Kind::Spacer) => 0.0,
+            (Some(Kind::Heading(_)), Kind::Heading(_)) => 0.0,
+            (_, Kind::Heading(level)) => spacing.heading_above.level(level),
+            (Some(Kind::Heading(level)), _) => spacing.heading_below.level(level),
             _ => spacing.block,
+        }
+    }
+
+    /// Start a new page, unless the current one is still empty (in which case
+    /// breaking would leave a blank page behind).
+    fn force_page_break(&mut self) {
+        if self.y > self.theme.page.content_top() || !self.page().elements.is_empty() {
+            self.new_page();
         }
     }
 
@@ -118,12 +132,19 @@ impl<'a> Engine<'a> {
         let mut prev: Option<Kind> = None;
         let mut i = 0;
         while i < blocks.len() {
-            if matches!(blocks[i], Block::Heading { .. }) {
-                // Group the heading with everything up to the next heading, so
-                // the section can be kept together across page breaks.
+            if matches!(blocks[i], Block::PageBreak) {
+                self.force_page_break();
+                prev = None;
+                i += 1;
+            } else if matches!(blocks[i], Block::Heading { .. }) {
+                // Group the heading with everything up to the next heading or
+                // page break, so the section can be kept together across page
+                // breaks.
                 let start = i;
                 i += 1;
-                while i < blocks.len() && !matches!(blocks[i], Block::Heading { .. }) {
+                while i < blocks.len()
+                    && !matches!(blocks[i], Block::Heading { .. } | Block::PageBreak)
+                {
                     i += 1;
                 }
                 prev = Some(self.layout_section(&blocks[start..i], prev));
@@ -140,7 +161,7 @@ impl<'a> Engine<'a> {
     fn layout_block(&mut self, block: &Block) {
         let text_color = self.theme.palette.text;
         match block {
-            Block::Heading { level, content } => {
+            Block::Heading { level, content, .. } => {
                 let size = self.theme.font_size.heading(*level);
                 self.layout_paragraph(content, size, true, false, text_color)
             }
@@ -153,6 +174,8 @@ impl<'a> Engine<'a> {
             Block::BulletList(items) => self.layout_bullet_list(items),
             Block::OrderedList { marker, items } => self.layout_ordered_list(*marker, items),
             Block::Box { style, content } => self.layout_box(style, content),
+            Block::PageBreak => self.force_page_break(),
+            Block::Spacer(height) => self.y += height,
         }
     }
 
@@ -196,6 +219,11 @@ impl<'a> Engine<'a> {
     fn layout_box_blocks(&mut self, blocks: &[Block]) {
         let mut prev: Option<&Block> = None;
         for block in blocks {
+            // A box is kept together on one page; a page break inside it has
+            // no meaning.
+            if matches!(block, Block::PageBreak) {
+                continue;
+            }
             match prev {
                 None => self.y -= self.leading_above(block),
                 Some(prev) => {
@@ -252,7 +280,10 @@ impl<'a> Engine<'a> {
     ///
     /// Returns the kind of the section's last block, for the caller's spacing.
     fn layout_section(&mut self, section: &[Block], prev: Option<Kind>) -> Kind {
-        let lead_gap = self.gap_before(prev, Kind::Heading);
+        let Block::Heading { level, .. } = &section[0] else {
+            unreachable!("a section starts with its heading");
+        };
+        let lead_gap = self.gap_before(prev, Kind::Heading(*level));
         let content_top = self.theme.page.content_top();
         let content_bottom = self.theme.page.content_bottom();
         let page_height = content_bottom - content_top;
@@ -282,7 +313,7 @@ impl<'a> Engine<'a> {
             self.layout_block(block);
             prev = Some(kind_of(block));
         }
-        prev.unwrap_or(Kind::Heading)
+        prev.unwrap_or(Kind::Heading(*level))
     }
 
     // --- Measurement (dry-run height, no drawing) ------------------------
@@ -312,6 +343,9 @@ impl<'a> Engine<'a> {
         let mut height = 0.0;
         let mut prev: Option<&Block> = None;
         for block in blocks {
+            if matches!(block, Block::PageBreak) {
+                continue;
+            }
             match prev {
                 None => height -= self.leading_above(block),
                 Some(prev) => {
@@ -332,7 +366,7 @@ impl<'a> Engine<'a> {
     /// The height a single block would occupy at the given content width.
     fn measure_block(&self, block: &Block, width: f32) -> f32 {
         match block {
-            Block::Heading { level, content } => {
+            Block::Heading { level, content, .. } => {
                 let size = self.theme.font_size.heading(*level);
                 self.paragraph_height(content, size, true, false, width)
             }
@@ -347,6 +381,8 @@ impl<'a> Engine<'a> {
                 let inner = self.measure_box_blocks(content, box_inner_width(style, width));
                 inner + 2.0 * style.padding_y + 2.0 * style.margin_y
             }
+            Block::PageBreak => 0.0,
+            Block::Spacer(height) => *height,
         }
     }
 }

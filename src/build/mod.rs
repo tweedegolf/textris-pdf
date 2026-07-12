@@ -14,7 +14,7 @@
 //! doc.h2("Marine species profile");
 //! doc.h1("The Mantis Shrimp");
 //! doc.paragraph("A profile of the order Stomatopoda …");
-//! doc.h3("1. Classification");
+//! doc.h3_numbered("Classification").anchor("classification");
 //! doc.paragraph(bold("Order Stomatopoda"));
 //! doc.table(
 //!     ["", "common name", "species"],
@@ -42,23 +42,36 @@
 
 mod text;
 
-pub use text::{IntoText, Text, bold, italic, mono, muted, text};
+pub use text::{
+    IntoCell, IntoText, Text, blank, bold, cell, fill_in, italic, mono, muted, section_ref, spacer,
+    text,
+};
 
 use std::{io, path::Path};
 
 use crate::{
     fonts::Fonts,
-    model::{Block, Chrome, Document, Inline, ListMarker, SectionContent, Table, TaskItem},
+    model::{Block, Cell, Chrome, Document, Inline, ListMarker, SectionContent, Table, TaskItem},
+    render::RenderError,
     theme::{BoxStyle, TableStyle, Theme},
 };
 
-/// Collect a row/list of cells, each of which is any [`IntoText`], into inline runs.
-fn cells<I, C>(items: I) -> Vec<Vec<Inline>>
+/// Collect a list of items, each of which is any [`IntoText`], into inline runs.
+fn items<I, C>(items: I) -> Vec<Vec<Inline>>
 where
     I: IntoIterator<Item = C>,
     C: IntoText,
 {
     items.into_iter().map(IntoText::into_inlines).collect()
+}
+
+/// Collect a table row of cells, each of which is any [`IntoCell`].
+fn cells<I, C>(cells: I) -> Vec<Cell>
+where
+    I: IntoIterator<Item = C>,
+    C: IntoCell,
+{
+    cells.into_iter().map(IntoCell::into_cell).collect()
 }
 
 /// The document builder.
@@ -126,10 +139,65 @@ impl Textris {
     /// / [`h4`](Self::h4) / [`h5`](Self::h5)
     /// methods for the common cases.
     pub fn heading(&mut self, level: u8, text: impl IntoText) -> &mut Self {
+        self.push_heading(level, text, false)
+    }
+
+    fn push_heading(&mut self, level: u8, text: impl IntoText, numbered: bool) -> &mut Self {
         self.doc.blocks.push(Block::Heading {
             level,
             content: text.into_inlines(),
+            numbered,
+            label: None,
         });
+        self
+    }
+
+    /// Add a heading that carries an automatic section number ("3", "3.1", …),
+    /// prefixed to its text when the document is built. One counter runs per
+    /// level, and a deeper numbered heading nests under the last shallower
+    /// one, so numbered `h3`/`h4` headings yield `1.`, `1.1.`, `1.2.`, `2.`, …
+    /// Use the [`h3_numbered`](Self::h3_numbered) /
+    /// [`h4_numbered`](Self::h4_numbered) / [`h5_numbered`](Self::h5_numbered)
+    /// shorthands for the common levels, and [`anchor`](Self::anchor) to make
+    /// the section referenceable.
+    pub fn heading_numbered(&mut self, level: u8, text: impl IntoText) -> &mut Self {
+        self.push_heading(level, text, true)
+    }
+
+    /// Add a numbered level-3 heading (section). See
+    /// [`heading_numbered`](Self::heading_numbered).
+    pub fn h3_numbered(&mut self, text: impl IntoText) -> &mut Self {
+        self.heading_numbered(3, text)
+    }
+
+    /// Add a numbered level-4 heading (subsection).
+    pub fn h4_numbered(&mut self, text: impl IntoText) -> &mut Self {
+        self.heading_numbered(4, text)
+    }
+
+    /// Add a numbered level-5 heading.
+    pub fn h5_numbered(&mut self, text: impl IntoText) -> &mut Self {
+        self.heading_numbered(5, text)
+    }
+
+    /// Label the heading just added, so other text can reference its section
+    /// number with [`section_ref`] (forward references included):
+    ///
+    /// ```
+    /// # use textris_pdf::build::{Textris, text};
+    /// let mut doc = Textris::new();
+    /// doc.h3_numbered("Vision").anchor("vision");
+    /// doc.paragraph(text("As shown in section ").section_ref("vision").normal("."));
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// Panics when the last block added is not a heading.
+    pub fn anchor(&mut self, label: impl Into<String>) -> &mut Self {
+        match self.doc.blocks.last_mut() {
+            Some(Block::Heading { label: slot, .. }) => *slot = Some(label.into()),
+            _ => panic!("anchor() must directly follow a heading"),
+        }
         self
     }
 
@@ -169,12 +237,32 @@ impl Textris {
         self.paragraph(text)
     }
 
+    /// Force a page break: the following content starts on a fresh page. A
+    /// break at the top of an already-empty page does nothing.
+    pub fn page_break(&mut self) -> &mut Self {
+        self.doc.blocks.push(Block::PageBreak);
+        self
+    }
+
+    /// Add fixed vertical space of `height` points. No inter-block gap is
+    /// added around a spacer, so it *is* the distance between its neighbours —
+    /// handy for extra air between sections. Express theme-relative heights
+    /// with [`em`](crate::theme::em). For vertical space inside a table cell,
+    /// see the [`spacer`] cell helper.
+    pub fn spacer(&mut self, height: f32) -> &mut Self {
+        self.doc.blocks.push(Block::Spacer(height));
+        self
+    }
+
     /// Add a data table ([`TableStyle::data`]): a header row followed by body
     /// rows, with an italic header and zebra-striped body.
     ///
-    /// Each header and cell is any [`IntoText`]. Because array literals must be
-    /// homogeneous, mix styles by wrapping every cell in a helper so the element
-    /// type is uniform, e.g. `[text("1"), mono("18 cm")]`.
+    /// Each header and cell is any [`IntoCell`]: plain strings and rich
+    /// [`Text`] become text cells, and the [`cell`], [`fill_in`], [`blank`]
+    /// and [`spacer`] helpers build the special cells. Because array literals
+    /// must be homogeneous, mix kinds by wrapping every cell in a helper so
+    /// the element type is uniform, e.g. `[text("1"), mono("18 cm")]` or
+    /// `[cell("Date"), fill_in()]`.
     ///
     /// To use a different [`TableStyle`], call [`table_styled`](Self::table_styled).
     ///
@@ -192,10 +280,10 @@ impl Textris {
     pub fn table<H, HC, R, RC>(&mut self, headers: H, rows: R) -> &mut Self
     where
         H: IntoIterator<Item = HC>,
-        HC: IntoText,
+        HC: IntoCell,
         R: IntoIterator<Item = RC>,
         RC: IntoIterator,
-        RC::Item: IntoText,
+        RC::Item: IntoCell,
     {
         self.table_styled(&TableStyle::data(), headers, rows)
     }
@@ -220,13 +308,13 @@ impl Textris {
     ) -> &mut Self
     where
         H: IntoIterator<Item = HC>,
-        HC: IntoText,
+        HC: IntoCell,
         R: IntoIterator<Item = RC>,
         RC: IntoIterator,
-        RC::Item: IntoText,
+        RC::Item: IntoCell,
     {
         let headers = cells(headers);
-        let rows: Vec<Vec<Vec<Inline>>> = rows.into_iter().map(cells).collect();
+        let rows: Vec<Vec<Cell>> = rows.into_iter().map(cells).collect();
         self.doc.blocks.push(Block::Table(Table {
             style: style.clone(),
             headers,
@@ -258,30 +346,41 @@ impl Textris {
     }
 
     /// Add a two-column label table: no header row, left column holds labels, no
-    /// zebra striping. Convenience for the common `key / value` form.
+    /// zebra striping. Convenience for the common `key / value` form. Use
+    /// [`fill_in`] for value cells that should render as a blank line to fill
+    /// in:
+    ///
+    /// ```
+    /// # use textris_pdf::build::{Textris, cell, fill_in};
+    /// let mut doc = Textris::new();
+    /// doc.label_table([
+    ///     [cell("Observer"), cell("Costa, R.")],
+    ///     [cell("Date"), fill_in()],
+    /// ]);
+    /// ```
     pub fn label_table<R, RC>(&mut self, rows: R) -> &mut Self
     where
         R: IntoIterator<Item = RC>,
         RC: IntoIterator,
-        RC::Item: IntoText,
+        RC::Item: IntoCell,
     {
-        let rows: Vec<Vec<Vec<Inline>>> = rows.into_iter().map(cells).collect();
+        let rows: Vec<Vec<Cell>> = rows.into_iter().map(cells).collect();
         let columns = rows.iter().map(Vec::len).max().unwrap_or(0);
         self.doc.blocks.push(Block::Table(Table {
             style: TableStyle::label(),
-            headers: vec![Vec::new(); columns],
+            headers: vec![Cell::Blank; columns],
             rows,
         }));
         self
     }
 
     /// Add a plain bullet list. Each item is any [`IntoText`].
-    pub fn bullet_list<I, C>(&mut self, items: I) -> &mut Self
+    pub fn bullet_list<I, C>(&mut self, list: I) -> &mut Self
     where
         I: IntoIterator<Item = C>,
         C: IntoText,
     {
-        self.doc.blocks.push(Block::BulletList(cells(items)));
+        self.doc.blocks.push(Block::BulletList(items(list)));
         self
     }
 
@@ -304,14 +403,14 @@ impl Textris {
     /// let mut doc = Textris::new();
     /// doc.ordered_list_with(ListMarker::LowerAlpha, ["first", "second"]);
     /// ```
-    pub fn ordered_list_with<I, C>(&mut self, marker: ListMarker, items: I) -> &mut Self
+    pub fn ordered_list_with<I, C>(&mut self, marker: ListMarker, list: I) -> &mut Self
     where
         I: IntoIterator<Item = C>,
         C: IntoText,
     {
         self.doc.blocks.push(Block::OrderedList {
             marker,
-            items: cells(items),
+            items: items(list),
         });
         self
     }
@@ -413,25 +512,33 @@ impl Textris {
         self
     }
 
-    /// Consume the builder and return the assembled [`Document`].
+    /// Consume the builder and return the assembled [`Document`], with section
+    /// numbering and references resolved (see [`Document::resolve_sections`]).
     pub fn build(self) -> Document {
-        self.doc
+        let mut doc = self.doc;
+        doc.resolve_sections();
+        doc
     }
 
-    /// A borrowed view of the document built so far.
+    /// A borrowed view of the document built so far. Section numbering and
+    /// references are still unresolved here; [`build`](Self::build) resolves
+    /// them.
     pub fn document(&self) -> &Document {
         &self.doc
     }
 
-    /// Lay out and render the document to PDF bytes.
-    pub fn render(&self, fonts: &Fonts) -> Vec<u8> {
-        let pages = crate::layout::layout(&self.doc, fonts);
-        crate::render::render(&pages, &self.doc, fonts)
+    /// Lay out and render the document to PDF/A-2b bytes.
+    pub fn render(&self, fonts: &Fonts) -> Result<Vec<u8>, RenderError> {
+        let mut doc = self.doc.clone();
+        doc.resolve_sections();
+        let pages = crate::layout::layout(&doc, fonts);
+        crate::render::render(&pages, &doc, fonts)
     }
 
     /// Render the document and write the PDF to `path`.
     pub fn render_to_file(&self, path: impl AsRef<Path>, fonts: &Fonts) -> io::Result<()> {
-        std::fs::write(path, self.render(fonts))
+        let pdf = self.render(fonts).map_err(io::Error::other)?;
+        std::fs::write(path, pdf)
     }
 }
 
@@ -440,27 +547,27 @@ impl Textris {
 /// Defaults to [`TableStyle::data`]; call [`style`](Self::style) to use another.
 #[derive(Debug, Default)]
 pub struct TableBuilder {
-    headers: Vec<Vec<Inline>>,
-    rows: Vec<Vec<Vec<Inline>>>,
+    headers: Vec<Cell>,
+    rows: Vec<Vec<Cell>>,
     style: TableStyle,
 }
 
 impl TableBuilder {
-    /// Set the header row. Cells are any [`IntoText`].
+    /// Set the header row. Cells are any [`IntoCell`].
     pub fn headers<I, C>(&mut self, headers: I) -> &mut Self
     where
         I: IntoIterator<Item = C>,
-        C: IntoText,
+        C: IntoCell,
     {
         self.headers = cells(headers);
         self
     }
 
-    /// Append a body row. Cells are any [`IntoText`].
+    /// Append a body row. Cells are any [`IntoCell`].
     pub fn row<I, C>(&mut self, row: I) -> &mut Self
     where
         I: IntoIterator<Item = C>,
-        C: IntoText,
+        C: IntoCell,
     {
         self.rows.push(cells(row));
         self
@@ -525,7 +632,7 @@ mod tests {
         };
         assert_eq!(table.style, TableStyle::data());
         assert_eq!(table.rows.len(), 3);
-        assert_eq!(plain_text(&table.rows[2][0]), "2");
+        assert_eq!(plain_text(table.rows[2][0].inlines()), "2");
     }
 
     #[test]

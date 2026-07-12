@@ -4,10 +4,19 @@
 //! produced by the [`crate::layout`] engine and, for every page, also draws the
 //! running header and footer (which depend on the total page count and therefore
 //! cannot be produced during layout).
+//!
+//! The output conforms to PDF/A-2b, the archival profile of PDF 1.7: krilla
+//! validates the document while serializing, embeds an sRGB output intent and
+//! writes XMP metadata. Content that cannot conform (for example a character
+//! that maps to a font's `.notdef` glyph) surfaces as a [`RenderError`].
+
+use std::fmt;
 
 use krilla::{
-    Document as KrillaDocument,
+    Document as KrillaDocument, SerializeSettings,
     color::rgb,
+    configure::{Archival, ConfigurationBuilder},
+    error::KrillaError,
     geom::{PathBuilder, Point, Rect},
     num::NormalizedF32,
     page::PageSettings,
@@ -22,9 +31,29 @@ use crate::{
     theme::Theme,
 };
 
-/// Render laid-out pages plus document chrome into PDF bytes.
-pub fn render(pages: &[Page], document: &Document, fonts: &Fonts) -> Vec<u8> {
-    let mut pdf = KrillaDocument::new();
+/// An error produced while serializing the PDF, most commonly a PDF/A-2b
+/// validation failure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenderError(KrillaError);
+
+impl fmt::Display for RenderError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "failed to serialize PDF: {}", self.0)
+    }
+}
+
+impl std::error::Error for RenderError {}
+
+/// Render laid-out pages plus document chrome into PDF/A-2b bytes.
+pub fn render(pages: &[Page], document: &Document, fonts: &Fonts) -> Result<Vec<u8>, RenderError> {
+    let configuration = ConfigurationBuilder::new()
+        .with_archival_validator(Archival::A2_B)
+        .finish()
+        .expect("PDF/A-2b on its own is a valid configuration");
+    let mut pdf = KrillaDocument::new_with(SerializeSettings {
+        configuration,
+        ..Default::default()
+    });
     let total = pages.len();
     let theme = &document.theme;
 
@@ -64,7 +93,7 @@ pub fn render(pages: &[Page], document: &Document, fonts: &Fonts) -> Vec<u8> {
         krilla_page.finish();
     }
 
-    pdf.finish().expect("PDF serialization should not fail")
+    pdf.finish().map_err(RenderError)
 }
 
 fn draw_element(surface: &mut Surface, fonts: &Fonts, element: &Element) {
@@ -188,7 +217,10 @@ fn draw_spans(
     let text_color = theme.palette.text;
     for span in spans {
         let style = span.resolve_style(false, false);
-        let color = span.color.unwrap_or(text_color);
+        let color = span
+            .color
+            .map(|c| c.resolve(&theme.palette))
+            .unwrap_or(text_color);
         let shaped = fonts.shape(style, &span.text);
         surface.set_stroke(None);
         surface.set_fill(Some(solid_fill(color)));

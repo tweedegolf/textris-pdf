@@ -609,10 +609,10 @@ fn box_spacing_measures_to_the_visible_text_edges() {
     let title_bottom = title.baseline + fonts.descent(Style::Regular, title.size);
     let body_cap_top = body.baseline - fonts.cap_height(Style::Regular, body.size);
     assert!(
-        (body_cap_top - title_bottom - theme.spacing.heading_below).abs() < 0.01,
+        (body_cap_top - title_bottom - theme.spacing.heading_below.level(4)).abs() < 0.01,
         "visible heading gap {} should equal heading_below {}",
         body_cap_top - title_bottom,
-        theme.spacing.heading_below
+        theme.spacing.heading_below.level(4)
     );
 
     // The last line's descender bottom sits one padding above the box's
@@ -621,6 +621,198 @@ fn box_spacing_measures_to_the_visible_text_edges() {
     assert!(
         (box_top + box_h - style.padding_y - body_bottom).abs() < 0.01,
         "body descender bottom {body_bottom} should be padding above the box bottom"
+    );
+}
+
+#[test]
+fn an_explicit_page_break_starts_a_new_page() {
+    let fonts = test_fonts();
+    let mut doc = Textris::new();
+    // A leading page break on an empty page must not create a blank page.
+    doc.page_break();
+    doc.paragraph("First page.");
+    doc.page_break();
+    doc.paragraph("Second page.");
+    let pages = layout(&doc.build(), &fonts);
+    assert_eq!(pages.len(), 2);
+    assert!(texts(&pages[0]).iter().any(|t| t.text.contains("First")));
+    assert!(texts(&pages[1]).iter().any(|t| t.text.contains("Second")));
+}
+
+#[test]
+fn a_spacer_is_exactly_the_distance_between_its_neighbours() {
+    let fonts = test_fonts();
+    let theme = Theme::default();
+    let size = theme.font_size.body;
+    let line_h = size * theme.spacing.line_height;
+    let gap = 50.0;
+
+    let mut doc = Textris::new();
+    doc.paragraph("above");
+    doc.spacer(gap);
+    doc.paragraph("below");
+    let pages = layout(&doc.build(), &fonts);
+
+    let baseline_of = |needle: &str| {
+        texts(&pages[0])
+            .into_iter()
+            .find(|t| t.text == needle)
+            .unwrap_or_else(|| panic!("paragraph {needle:?}"))
+            .baseline
+    };
+    // No block gap is added around the spacer: the second paragraph's line box
+    // starts exactly `gap` below the first one's.
+    assert!(
+        (baseline_of("below") - baseline_of("above") - (line_h + gap)).abs() < 0.01,
+        "spacer should replace the inter-block gap"
+    );
+}
+
+#[test]
+fn spacer_blocks_suppress_the_gaps_around_them() {
+    let fonts = test_fonts();
+    let theme = Theme::default();
+    let engine = Engine::new(&fonts, &theme);
+    assert_eq!(engine.gap_before(Some(Kind::Spacer), Kind::Other), 0.0);
+    assert_eq!(engine.gap_before(Some(Kind::Other), Kind::Spacer), 0.0);
+    assert_eq!(engine.gap_before(Some(Kind::Spacer), Kind::Heading(3)), 0.0);
+}
+
+#[test]
+fn heading_spacing_is_resolved_per_level() {
+    let fonts = test_fonts();
+    let theme = Theme::default();
+    let engine = Engine::new(&fonts, &theme);
+    let above = |level| engine.gap_before(Some(Kind::Other), Kind::Heading(level));
+    let below = |level| engine.gap_before(Some(Kind::Heading(level)), Kind::Other);
+    assert_eq!(above(1), theme.spacing.heading_above.h1);
+    assert_eq!(above(3), theme.spacing.heading_above.h3);
+    assert!(
+        above(1) > above(4),
+        "level-1 headings should get more air than subsections"
+    );
+    assert_eq!(below(2), theme.spacing.heading_below.h2);
+}
+
+#[test]
+fn fill_in_cells_draw_a_line_and_blank_cells_draw_nothing() {
+    use crate::build::{blank, cell, fill_in};
+    let fonts = test_fonts();
+    let mut doc = Textris::new();
+    doc.label_table([
+        [cell("Observer"), cell("Costa, R.")],
+        [cell("Date"), fill_in()],
+        [cell("Remarks"), blank()],
+    ]);
+    let pages = layout(&doc.build(), &fonts);
+
+    // Exactly one stroke: the Date row's fill-in line. The blank cell and the
+    // filled text cells draw none.
+    let strokes = pages[0]
+        .elements
+        .iter()
+        .filter(|e| matches!(e, Element::Stroke { .. }))
+        .count();
+    assert_eq!(strokes, 1, "one fill-in line expected");
+}
+
+#[test]
+fn a_spacer_cell_stretches_its_row() {
+    use crate::build::spacer;
+    let fonts = test_fonts();
+    let theme = Theme::default();
+    let tall = 100.0;
+    let mut doc = Textris::new();
+    doc.table(["h", ""], [[crate::build::cell("a"), spacer(tall)]]);
+    let pages = layout(&doc.build(), &fonts);
+
+    // The striped body row's rect reflects the row height.
+    let row_h = pages[0]
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            Element::Rect { h, .. } => Some(*h),
+            _ => None,
+        })
+        .expect("striped body row");
+    assert!(
+        (row_h - (tall + 2.0 * theme.table.inset_y)).abs() < 0.01,
+        "row should be the spacer height plus insets, got {row_h}"
+    );
+}
+
+#[test]
+fn numbered_headings_and_references_resolve_through_the_builder() {
+    let fonts = test_fonts();
+    let mut doc = Textris::new();
+    doc.h3_numbered("Introduction").anchor("intro");
+    doc.h4_numbered("Scope");
+    doc.h3_numbered("Methods");
+    doc.paragraph(
+        crate::build::text("See section ")
+            .section_ref("intro")
+            .normal("."),
+    );
+    let pages = layout(&doc.build(), &fonts);
+
+    let all: Vec<String> = texts(&pages[0]).iter().map(|t| t.text.clone()).collect();
+    assert!(
+        all.iter().any(|t| t.starts_with("1.")),
+        "numbered h3: {all:?}"
+    );
+    assert!(
+        all.iter().any(|t| t.starts_with("1.1.")),
+        "nested h4: {all:?}"
+    );
+    assert!(all.iter().any(|t| t.starts_with("2.")), "second h3");
+    // The reference resolves to the plain section number.
+    assert!(
+        all.iter().any(|t| t.split(' ').any(|w| w == "1")),
+        "section reference should resolve to \"1\": {all:?}"
+    );
+}
+
+#[test]
+fn hard_line_breaks_split_lines_and_make_empty_lines() {
+    let fonts = test_fonts();
+    let theme = Theme::default();
+    let line_h = theme.font_size.body * theme.spacing.line_height;
+    let mut doc = Textris::new();
+    doc.paragraph("one\ntwo\n\nthree");
+    let pages = layout(&doc.build(), &fonts);
+
+    let mut baselines: Vec<f32> = texts(&pages[0]).iter().map(|t| t.baseline).collect();
+    baselines.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    assert_eq!(baselines.len(), 3, "three visible lines");
+    assert!(
+        (baselines[1] - baselines[0] - line_h).abs() < 0.01,
+        "single break advances one line"
+    );
+    assert!(
+        (baselines[2] - baselines[1] - 2.0 * line_h).abs() < 0.01,
+        "a double break leaves an empty line"
+    );
+}
+
+#[test]
+fn muted_text_follows_the_theme_palette() {
+    use crate::build::muted;
+    use krilla::color::rgb;
+    let fonts = test_fonts();
+    let mut theme = Theme::default();
+    theme.palette.muted = rgb::Color::new(200, 10, 10);
+
+    let mut doc = Textris::with_theme(theme.clone());
+    doc.paragraph(muted("secondary"));
+    let pages = layout(&doc.build(), &fonts);
+
+    let run = texts(&pages[0])
+        .into_iter()
+        .find(|t| t.text == "secondary")
+        .expect("muted run");
+    assert_eq!(
+        run.color, theme.palette.muted,
+        "muted text should resolve the theme's muted color at layout time"
     );
 }
 

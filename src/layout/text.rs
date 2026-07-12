@@ -19,6 +19,23 @@ pub(super) struct Word {
     pub(super) text: String,
     pub(super) glyphs: Arc<[KrillaGlyph]>,
     pub(super) width: f32,
+    /// A zero-width marker for a hard line break (`'\n'`): [`Engine::wrap`]
+    /// ends the current line here and the marker itself is never drawn.
+    pub(super) hard_break: bool,
+}
+
+impl Word {
+    /// The zero-width hard-break marker.
+    fn hard_break() -> Self {
+        Self {
+            style: Style::Regular,
+            color: None,
+            text: String::new(),
+            glyphs: Vec::new().into(),
+            width: 0.0,
+            hard_break: true,
+        }
+    }
 }
 
 /// Append `glyphs` to `out`, shifting their text ranges so they point into a
@@ -152,6 +169,7 @@ impl Engine<'_> {
     }
 
     /// Shape each whitespace-separated word of the inlines into a [`Word`].
+    /// Newlines become hard-break markers, honored by [`wrap`](Self::wrap).
     pub(super) fn tokenize(
         &self,
         inlines: &[Inline],
@@ -162,11 +180,17 @@ impl Engine<'_> {
         let mut words = Vec::new();
         for inline in inlines {
             let style = inline.resolve_style(base_bold, base_italic);
-            for token in inline.text.split(' ') {
-                if token.is_empty() {
-                    continue;
+            let color = inline.color.map(|c| c.resolve(&self.theme.palette));
+            for (index, segment) in inline.text.split('\n').enumerate() {
+                if index > 0 {
+                    words.push(Word::hard_break());
                 }
-                words.push(self.shape_word(style, inline.color, token, size));
+                for token in segment.split(' ') {
+                    if token.is_empty() {
+                        continue;
+                    }
+                    words.push(self.shape_word(style, color, token, size));
+                }
             }
         }
         words
@@ -174,7 +198,8 @@ impl Engine<'_> {
 
     /// Greedy line breaking: pack words until the next one would overflow. A
     /// word wider than `max_width` is broken into character-level fragments so
-    /// it wraps instead of overflowing.
+    /// it wraps instead of overflowing. Hard-break markers end the current
+    /// line unconditionally (two in a row yield an empty line).
     pub(super) fn wrap(&self, words: Vec<Word>, max_width: f32, size: f32) -> Vec<Vec<Word>> {
         // `space_before` is false for the continuation fragments of a broken
         // word so no space is inserted mid-word.
@@ -198,6 +223,11 @@ impl Engine<'_> {
         let mut width = 0.0;
 
         for (word, space_before) in pieces {
+            if word.hard_break {
+                lines.push(std::mem::take(&mut line));
+                width = 0.0;
+                continue;
+            }
             let space = if line.is_empty() || !space_before {
                 0.0
             } else {
@@ -251,6 +281,7 @@ impl Engine<'_> {
             text: text.to_string(),
             width: shaped.width(size),
             glyphs: shaped.glyphs,
+            hard_break: false,
         }
     }
 }

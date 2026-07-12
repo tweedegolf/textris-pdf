@@ -9,7 +9,7 @@
 //! 1. [`build`] assembles a [`model::Document`] block by block.
 //! 2. [`layout`] turns that model into positioned pages of drawing primitives,
 //!    using [`fonts`] for text measurement.
-//! 3. [`render`] paints those primitives into a PDF with krilla.
+//! 3. [`render`] paints those primitives into a PDF/A-2b file with krilla.
 //!
 //! [`theme`] holds the visual design tokens shared across stages, plus the
 //! per-element styles ([`theme::TableStyle`], [`theme::BoxStyle`]).
@@ -36,3 +36,7 @@ pub mod layout;
 pub mod model;
 pub mod render;
 pub mod theme;
+
+/// The RGB color type used throughout the theme and text APIs, re-exported
+/// from [`krilla`] so downstream crates need no direct krilla dependency.
+pub use krilla::color::rgb::Color;

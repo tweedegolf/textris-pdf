@@ -12,15 +12,18 @@
 //! The construction below drives the repeated content (species rows, the field
 //! checklist) from data with ordinary loops and conditionals, the payoff of
 //! building the document in code. It exercises the full block vocabulary:
-//! headings, paragraphs, tables, task lists, a boxed callout, and both numbered
-//! and lettered ordered lists.
+//! auto-numbered and referenced headings, paragraphs with hard line breaks,
+//! tables (including fill-in and spacer cells), task lists, a boxed callout,
+//! both numbered and lettered ordered lists, a vertical spacer, and an
+//! explicit page break.
 
 use std::path::Path;
 
 use textris_pdf::{
-    build::{Textris, bold, italic, mono, muted, text},
+    build::{Textris, bold, cell, fill_in, italic, mono, muted, spacer, text},
     fonts::Fonts,
     model::{ListMarker, SectionContent},
+    theme::em,
 };
 
 #[test]
@@ -28,7 +31,9 @@ fn renders_example_to_pdf_on_disk() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let fonts = load_fonts().expect("fonts should load");
 
-    let pdf = sample().render(&fonts);
+    let pdf = sample()
+        .render(&fonts)
+        .expect("document should render as valid PDF/A-2b");
 
     // It should be a real, non-trivial PDF.
     assert!(pdf.starts_with(b"%PDF-"), "output is not a PDF");
@@ -199,16 +204,27 @@ fn sample() -> Textris {
         );
     });
 
-    // A bullet list previewing the guide's contents.
+    // A bullet list previewing the guide's contents. The section numbers are
+    // forward references, resolved when the document is built.
     doc.h3("About this guide");
     doc.paragraph("This profile covers:");
     doc.bullet_list([
-        "how the group is classified and where it lives;",
-        "the mechanics of the predatory strike and the animal's vision;",
-        "notable species and how to record a field observation.",
+        text("how the group is classified and where it lives (sections ")
+            .section_ref("classification")
+            .normal(" and ")
+            .section_ref("habitat")
+            .normal(");"),
+        text("the mechanics of the predatory strike and the animal's vision (sections ")
+            .section_ref("strike")
+            .normal(" and ")
+            .section_ref("vision")
+            .normal(");"),
+        text("notable species and how to record a field observation (section ")
+            .section_ref("record")
+            .normal(" onwards)."),
     ]);
 
-    doc.h3("1. Classification");
+    doc.h3_numbered("Classification").anchor("classification");
     doc.paragraph(
         text("The mantis shrimp belong to the order ")
             .bold("Stomatopoda")
@@ -224,7 +240,7 @@ fn sample() -> Textris {
             ),
     );
 
-    doc.h3("2. Anatomy");
+    doc.h3_numbered("Anatomy");
     doc.paragraph(
         "The body is divided into a shielded head and thorax and a broad, \
          muscular tail. The features most worth knowing in the field are:",
@@ -235,7 +251,7 @@ fn sample() -> Textris {
         "the telson, the armoured tail plate used to block the burrow entrance.",
     ]);
 
-    doc.h3("3. The predatory strike");
+    doc.h3_numbered("The predatory strike").anchor("strike");
     doc.paragraph(
         "Stomatopods fall into two camps. Smashers wield a folded, club-like \
          appendage that they release like a spring; spearers deploy a barbed \
@@ -250,8 +266,12 @@ fn sample() -> Textris {
         .normal(
             " whose implosion delivers a second blow even if the first \
                      misses. The strike is among the fastest movements known in \
-                     any animal.",
-        ),
+                     any animal, and it is aimed by the visual system described \
+                     in section ",
+        )
+        // A forward reference: the vision section is added below.
+        .section_ref("vision")
+        .normal("."),
     );
     doc.paragraph(
         "The energy comes not from muscle alone but from a saddle-shaped spring in \
@@ -261,7 +281,7 @@ fn sample() -> Textris {
          and has inspired the design of impact-resistant materials.",
     );
 
-    doc.h3("4. Vision");
+    doc.h3_numbered("Vision").anchor("vision");
     doc.paragraph(
         text(
             "Each eye moves independently and carries three regions that view the \
@@ -275,6 +295,8 @@ fn sample() -> Textris {
          as sixteen, and can also detect both linear and circular polarised light, \
          a capability found in no other animal.",
     );
+    // A numbered subsection: nested under the vision section as "4.1.".
+    doc.h4_numbered("Colour discrimination");
     doc.paragraph(
         "Curiously, all those receptors do not make it a better judge of subtle \
          colour differences than we are. Current thinking is that the eye reads \
@@ -283,7 +305,7 @@ fn sample() -> Textris {
          animal that must decide in milliseconds whether to strike.",
     );
 
-    doc.h3("5. Diet and hunting");
+    doc.h3_numbered("Diet and hunting");
     doc.paragraph(
         text("Smashers specialise in ")
             .bold("hard-shelled prey")
@@ -295,7 +317,7 @@ fn sample() -> Textris {
             ),
     );
 
-    doc.h3("6. Behaviour and life history");
+    doc.h3_numbered("Behaviour and life history");
     doc.paragraph(
         "Most mantis shrimp are solitary and fiercely territorial, defending a \
          burrow or rock crevice. Some species, however, are monogamous and may \
@@ -327,7 +349,8 @@ fn sample() -> Textris {
          their own.",
     );
 
-    doc.h3("7. Habitat and distribution");
+    doc.h3_numbered("Habitat and distribution")
+        .anchor("habitat");
     doc.paragraph(
         text("Mantis shrimp are found in ").bold("shallow tropical and subtropical seas:"),
     );
@@ -342,7 +365,7 @@ fn sample() -> Textris {
 
     // Section 8: notable species. Rows come from the data, numbered as we go,
     // the kind of data-driven table that motivates building in code.
-    doc.h3("8. Notable species");
+    doc.h3_numbered("Notable species");
     doc.table_with(|t| {
         t.headers(["", "common name", "species", "strike", "max. length"]);
         for (i, s) in species.iter().enumerate() {
@@ -357,7 +380,7 @@ fn sample() -> Textris {
     });
 
     // Section 9: measurements, a second data table, this one keyed on figures.
-    doc.h3("9. Selected measurements");
+    doc.h3_numbered("Selected measurements");
     doc.paragraph("Representative figures for the smashers' strike and for vision:");
     doc.table_with(|t| {
         t.headers(["", "attribute", "value", "unit", "notes"]);
@@ -373,9 +396,13 @@ fn sample() -> Textris {
     });
 
     // Section 10: field checklist, where checkbox state comes straight from the data.
-    doc.h3("10. Field checklist");
+    doc.h3_numbered("Field checklist").anchor("record");
     doc.paragraph("When you observe an animal in the field, try to record the following:");
     doc.task_list(checklist.iter().map(|c| (c.required, c.description)));
+
+    // Some extra air before the next paragraph: a spacer replaces the normal
+    // inter-block gap, so this is the exact distance to the checklist above.
+    doc.spacer(em(2.0));
 
     // A lettered ordered list of what a usable record must contain.
     doc.paragraph("A complete identification record includes:");
@@ -388,15 +415,29 @@ fn sample() -> Textris {
         ],
     );
 
-    // Section 11: observation record, a label table with blank fields to fill in.
-    doc.h3("11. Observation record");
+    // The observation record is a form to print and fill in, so it starts on
+    // its own page.
+    doc.page_break();
+
+    // Section 11: a label table mixing prefilled cells, fill-in lines and a
+    // tall spacer cell for free-form notes.
+    doc.h3_numbered("Observation record");
     doc.label_table([
-        ["Observer", "Costa, R."],
-        ["Location", "Lembeh Strait, Indonesia"],
-        ["Date", ""],
-        ["Depth", ""],
-        ["Signature", ""],
+        [cell("Observer"), cell("Costa, R.")],
+        [cell("Location"), cell("Lembeh Strait, Indonesia")],
+        [cell("Date"), fill_in()],
+        [cell("Depth"), fill_in()],
+        [cell("Field notes"), spacer(em(6.0))],
+        [cell("Signature"), fill_in()],
     ]);
+
+    // Hard line breaks ('\n' or Text::line_break) keep an address inside one
+    // paragraph.
+    doc.paragraph(
+        text("Return completed records to:")
+            .line_break()
+            .normal("Stomatopod Survey, Marine Field Station\nLembeh Strait, North Sulawesi"),
+    );
 
     doc.footer_left(muted("Revision: ").mono("3"));
     doc.footer_right(SectionContent::page_counter(|page, total| {

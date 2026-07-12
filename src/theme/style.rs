@@ -86,8 +86,6 @@ pub struct TableStyle {
     pub striped: bool,
     /// Drop the left inset on the first column (a flush key column).
     pub flush_first_column: bool,
-    /// Turn empty cells (after the first column) into fill-in lines.
-    pub fill_in_blanks: bool,
     /// How column widths are computed.
     pub columns: ColumnWidths,
     /// Per-column horizontal alignment. The `n`th entry aligns the `n`th
@@ -121,7 +119,6 @@ impl TableStyle {
             header_italic: true,
             striped: true,
             flush_first_column: false,
-            fill_in_blanks: false,
             columns: ColumnWidths::Auto,
             align: Vec::new(),
             font_size: None,
@@ -129,15 +126,16 @@ impl TableStyle {
         }
     }
 
-    /// A label table: no header, a flush left label column, empty value cells
-    /// become fill-in lines, and a 1:2 label/value column split.
+    /// A label table: no header, a flush left label column, and a 1:2
+    /// label/value column split. Use [`Cell::FillIn`](crate::model::Cell) (via
+    /// the builder's `fill_in()` helper) for value cells that should render as
+    /// a blank line to fill in.
     pub fn label() -> Self {
         Self {
             header: false,
             header_italic: false,
             striped: false,
             flush_first_column: true,
-            fill_in_blanks: true,
             columns: ColumnWidths::Labels,
             align: Vec::new(),
             font_size: None,
@@ -160,12 +158,11 @@ impl Default for TableStyle {
 /// tweak individual fields:
 ///
 /// ```
-/// use textris_pdf::theme::BoxStyle;
-/// use krilla::color::rgb;
+/// use textris_pdf::{Color, theme::BoxStyle};
 ///
 /// // A callout tinted blue instead of grey.
 /// let note = BoxStyle {
-///     background: rgb::Color::new(0xEE, 0xF4, 0xFF),
+///     background: Color::new(0xEE, 0xF4, 0xFF),
 ///     ..BoxStyle::callout()
 /// };
 /// ```

@@ -2,13 +2,13 @@
 //! document. The [`build`](crate::build) API produces this; the layout engine
 //! consumes it.
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use krilla::color::rgb;
 
 use crate::{
     fonts::Style,
-    theme::{BoxStyle, TableStyle, Theme},
+    theme::{BoxStyle, Palette, TableStyle, Theme},
 };
 
 /// A whole document ready to be laid out.
@@ -24,11 +24,136 @@ pub struct Document {
     pub theme: Theme,
 }
 
+impl Document {
+    /// Resolve section numbering in place.
+    ///
+    /// Numbered headings (see [`Block::Heading::numbered`]) get a hierarchical
+    /// number ("3", "3.1", …) built from one counter per heading level and
+    /// prefixed to their text. Section references ([`Inline::section_ref`])
+    /// are then replaced with the number of the section they point to, so
+    /// forward references work. Headings inside [`Block::Box`] content
+    /// participate as well.
+    ///
+    /// The builder's [`build`](crate::build::Textris::build) and
+    /// [`render`](crate::build::Textris::render) call this automatically; the
+    /// pass is idempotent because it clears the `numbered` flags and
+    /// `section_ref` markers it resolves.
+    pub fn resolve_sections(&mut self) {
+        let mut counters = [0usize; 6];
+        let mut numbers = HashMap::new();
+        number_headings(&mut self.blocks, &mut counters, &mut numbers);
+        resolve_refs_in_blocks(&mut self.blocks, &numbers);
+        for section in [&mut self.header, &mut self.footer] {
+            for content in [&mut section.left, &mut section.center, &mut section.right]
+                .into_iter()
+                .flatten()
+            {
+                if let SectionContent::Spans(spans) = content {
+                    resolve_refs_in_inlines(spans, &numbers);
+                }
+            }
+        }
+    }
+}
+
+/// Assign numbers to numbered headings, prefixing them to the heading text and
+/// recording labeled sections in `numbers`.
+fn number_headings(
+    blocks: &mut [Block],
+    counters: &mut [usize; 6],
+    numbers: &mut HashMap<String, String>,
+) {
+    for block in blocks {
+        match block {
+            Block::Heading {
+                level,
+                content,
+                numbered,
+                label,
+            } if *numbered => {
+                let level = (*level).clamp(1, 5) as usize;
+                counters[level] += 1;
+                for deeper in counters[level + 1..].iter_mut() {
+                    *deeper = 0;
+                }
+                let number = counters[1..=level]
+                    .iter()
+                    .filter(|&&c| c > 0)
+                    .map(usize::to_string)
+                    .collect::<Vec<_>>()
+                    .join(".");
+                content.insert(0, Inline::new(format!("{number}. ")));
+                if let Some(label) = label.take() {
+                    numbers.insert(label, number);
+                }
+                *numbered = false;
+            }
+            Block::Box { content, .. } => number_headings(content, counters, numbers),
+            _ => {}
+        }
+    }
+}
+
+/// Replace section-reference placeholder runs with their section number.
+fn resolve_refs_in_blocks(blocks: &mut [Block], numbers: &HashMap<String, String>) {
+    for block in blocks {
+        match block {
+            Block::Heading { content, .. } | Block::Paragraph(content) => {
+                resolve_refs_in_inlines(content, numbers)
+            }
+            Block::TaskList(items) => {
+                for item in items {
+                    resolve_refs_in_inlines(&mut item.content, numbers);
+                }
+            }
+            Block::BulletList(items) | Block::OrderedList { items, .. } => {
+                for item in items {
+                    resolve_refs_in_inlines(item, numbers);
+                }
+            }
+            Block::Table(table) => {
+                for cell in table
+                    .headers
+                    .iter_mut()
+                    .chain(table.rows.iter_mut().flatten())
+                {
+                    if let Cell::Text(inlines) = cell {
+                        resolve_refs_in_inlines(inlines, numbers);
+                    }
+                }
+            }
+            Block::Box { content, .. } => resolve_refs_in_blocks(content, numbers),
+            Block::PageBreak | Block::Spacer(_) => {}
+        }
+    }
+}
+
+fn resolve_refs_in_inlines(inlines: &mut [Inline], numbers: &HashMap<String, String>) {
+    for inline in inlines {
+        if let Some(label) = &inline.section_ref
+            && let Some(number) = numbers.get(label)
+        {
+            inline.text = number.clone();
+            inline.section_ref = None;
+        }
+    }
+}
+
 /// A top-level block element.
 #[derive(Debug, Clone)]
 pub enum Block {
     /// A heading at the given level (1 = largest, 3-5 = section headings).
-    Heading { level: u8, content: Vec<Inline> },
+    Heading {
+        level: u8,
+        content: Vec<Inline>,
+        /// Assign this heading a section number (see
+        /// [`Document::resolve_sections`]). The number is prefixed to the
+        /// heading text and the flag cleared when the document is resolved.
+        numbered: bool,
+        /// A label other content can reference with
+        /// [`Inline::section_ref`]; it resolves to the section number.
+        label: Option<String>,
+    },
     /// A paragraph of flowing text.
     Paragraph(Vec<Inline>),
     /// A table.
@@ -49,6 +174,12 @@ pub enum Block {
         style: BoxStyle,
         content: Vec<Block>,
     },
+    /// An explicit page break: the following content starts on a fresh page.
+    PageBreak,
+    /// Fixed vertical space of the given height in points. No inter-block gap
+    /// is added around a spacer, so it *is* the distance between its
+    /// neighbours.
+    Spacer(f32),
 }
 
 /// How an [`OrderedList`](Block::OrderedList) numbers its items.
@@ -86,6 +217,32 @@ fn alpha(index: usize) -> String {
     String::from_utf8(out).expect("ascii letters")
 }
 
+/// The color of an inline run: either a concrete value or a theme role that is
+/// resolved against the document's [`Palette`] at layout time.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum InlineColor {
+    /// A concrete color.
+    Rgb(rgb::Color),
+    /// The theme palette's muted (secondary) text color.
+    Muted,
+}
+
+impl InlineColor {
+    /// The concrete color this stands for under the given palette.
+    pub fn resolve(self, palette: &Palette) -> rgb::Color {
+        match self {
+            Self::Rgb(color) => color,
+            Self::Muted => palette.muted,
+        }
+    }
+}
+
+impl From<rgb::Color> for InlineColor {
+    fn from(color: rgb::Color) -> Self {
+        Self::Rgb(color)
+    }
+}
+
 /// A run of text with emphasis flags. The layout engine resolves these against a
 /// role-specific base style to pick a concrete font [`Style`].
 #[derive(Debug, Clone, PartialEq)]
@@ -95,7 +252,11 @@ pub struct Inline {
     pub italic: bool,
     pub mono: bool,
     /// Override the color for this run. `None` uses the default text color.
-    pub color: Option<rgb::Color>,
+    pub color: Option<InlineColor>,
+    /// When set, this run is a placeholder for the number of the section
+    /// labeled with this name: [`Document::resolve_sections`] replaces `text`
+    /// with the section number. An unknown label leaves the placeholder text.
+    pub section_ref: Option<String>,
 }
 
 impl Inline {
@@ -106,6 +267,7 @@ impl Inline {
             italic: false,
             mono: false,
             color: None,
+            section_ref: None,
         }
     }
 
@@ -136,13 +298,46 @@ pub struct TaskItem {
     pub content: Vec<Inline>,
 }
 
-/// A table of inline-formatted cells. Its presentation is decided by its
-/// [`TableStyle`], chosen when the table is added to the document.
+/// One table cell.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Cell {
+    /// Inline-formatted text.
+    Text(Vec<Inline>),
+    /// An empty cell with a fill-in line along its bottom (a blank form field).
+    FillIn,
+    /// A deliberately empty cell: nothing is drawn.
+    Blank,
+    /// An empty cell that forces its row to be at least this many points tall.
+    Spacer(f32),
+}
+
+impl Cell {
+    /// The cell's inline text, empty for the non-text variants.
+    pub fn inlines(&self) -> &[Inline] {
+        match self {
+            Self::Text(inlines) => inlines,
+            _ => &[],
+        }
+    }
+
+    /// Whether the cell shows nothing: blank, a spacer, or text that is empty
+    /// or whitespace. A fill-in cell draws its line, so it is not blank.
+    pub fn is_blank(&self) -> bool {
+        match self {
+            Self::Text(inlines) => plain_text(inlines).trim().is_empty(),
+            Self::FillIn => false,
+            Self::Blank | Self::Spacer(_) => true,
+        }
+    }
+}
+
+/// A table of cells. Its presentation is decided by its [`TableStyle`], chosen
+/// when the table is added to the document.
 #[derive(Debug, Clone)]
 pub struct Table {
     pub style: TableStyle,
-    pub headers: Vec<Vec<Inline>>,
-    pub rows: Vec<Vec<Vec<Inline>>>,
+    pub headers: Vec<Cell>,
+    pub rows: Vec<Vec<Cell>>,
 }
 
 impl Table {
@@ -229,6 +424,7 @@ mod tests {
             italic,
             mono,
             color: None,
+            section_ref: None,
         }
     }
 
@@ -278,9 +474,96 @@ mod tests {
     fn columns_uses_widest_row() {
         let table = Table {
             style: TableStyle::data(),
-            headers: vec![vec![], vec![Inline::new("a")]],
-            rows: vec![vec![vec![], vec![], vec![Inline::new("c")]]],
+            headers: vec![Cell::Blank, Cell::Text(vec![Inline::new("a")])],
+            rows: vec![vec![
+                Cell::Blank,
+                Cell::FillIn,
+                Cell::Text(vec![Inline::new("c")]),
+            ]],
         };
         assert_eq!(table.columns(), 3);
+    }
+
+    #[test]
+    fn cell_blankness_reflects_what_is_drawn() {
+        assert!(Cell::Blank.is_blank());
+        assert!(Cell::Spacer(20.0).is_blank());
+        assert!(Cell::Text(vec![Inline::new("  ")]).is_blank());
+        assert!(!Cell::FillIn.is_blank(), "a fill-in cell draws its line");
+        assert!(!Cell::Text(vec![Inline::new("x")]).is_blank());
+    }
+
+    /// Build a heading block for resolution tests.
+    fn heading(level: u8, text: &str, numbered: bool, label: Option<&str>) -> Block {
+        Block::Heading {
+            level,
+            content: vec![Inline::new(text)],
+            numbered,
+            label: label.map(String::from),
+        }
+    }
+
+    #[test]
+    fn resolve_sections_numbers_headings_hierarchically() {
+        let mut doc = Document {
+            blocks: vec![
+                heading(3, "Intro", true, None),
+                heading(4, "Scope", true, None),
+                heading(4, "Terms", true, None),
+                heading(3, "Body", true, None),
+                heading(4, "Detail", true, None),
+                heading(3, "Plain", false, None),
+            ],
+            ..Document::default()
+        };
+        doc.resolve_sections();
+
+        let texts: Vec<String> = doc
+            .blocks
+            .iter()
+            .map(|b| match b {
+                Block::Heading { content, .. } => plain_text(content),
+                _ => panic!("expected headings"),
+            })
+            .collect();
+        assert_eq!(
+            texts,
+            [
+                "1. Intro",
+                "1.1. Scope",
+                "1.2. Terms",
+                "2. Body",
+                "2.1. Detail",
+                "Plain"
+            ]
+        );
+    }
+
+    #[test]
+    fn resolve_sections_substitutes_forward_and_backward_references() {
+        let reference = |label: &str| Inline {
+            section_ref: Some(label.into()),
+            ..Inline::new("??")
+        };
+        let mut doc = Document {
+            blocks: vec![
+                Block::Paragraph(vec![reference("later")]),
+                heading(3, "First", true, Some("early")),
+                heading(3, "Second", true, Some("later")),
+                Block::Paragraph(vec![reference("early"), reference("missing")]),
+            ],
+            ..Document::default()
+        };
+        doc.resolve_sections();
+
+        let paragraph = |i: usize| match &doc.blocks[i] {
+            Block::Paragraph(inlines) => inlines.clone(),
+            _ => panic!("expected a paragraph"),
+        };
+        assert_eq!(plain_text(&paragraph(0)), "2", "forward reference");
+        let last = paragraph(3);
+        assert_eq!(last[0].text, "1", "backward reference");
+        assert_eq!(last[1].text, "??", "unknown labels keep the placeholder");
+        assert!(last[1].section_ref.is_some());
     }
 }

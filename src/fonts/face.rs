@@ -5,8 +5,12 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use harfrust::{
+    Direction, FontRef, NormalizedCoord, ShapeOptions, ShaperData, ShaperInstance, Tag as HrTag,
+    UnicodeBuffer, Variation,
+};
 use krilla::text::{Font, GlyphId, KrillaGlyph, Tag as KrillaTag};
-use rustybuzz::{Direction, Face as RbFace, UnicodeBuffer, Variation, ttf_parser::Tag as RbTag};
+use read_fonts::{TableProvider, tables::os2::SelectionFlags};
 
 use super::AxisTag;
 
@@ -83,10 +87,15 @@ impl Shaped {
 }
 
 /// A single loaded font face: the krilla font used for drawing plus a parsed
-/// `rustybuzz` face (with variations applied) used for shaping.
+/// `harfrust` font (with variations applied) used for shaping.
 pub(super) struct Face {
     pub(super) krilla: Font,
-    rb: RbFace<'static>,
+    font: FontRef<'static>,
+    /// Shaping caches shared by every [`shape`](Self::shape) call; building the
+    /// per-call `Shaper` from these is cheap.
+    shaper_data: ShaperData,
+    /// The pinned variation instance (normalized coordinates).
+    instance: ShaperInstance,
     /// Memoized shaping results; documents shape the same short runs many times.
     cache: Mutex<HashMap<String, Shaped>>,
     units_per_em: f32,
@@ -116,22 +125,31 @@ impl Face {
             .collect();
         let krilla = Font::new_variable(data.into(), index, &krilla_coords)?;
 
-        let mut rb = RbFace::from_slice(data, index)?;
-        rb.set_variations(&rb_variations(&variations));
+        let font = FontRef::from_index(data, index).ok()?;
+        let instance = ShaperInstance::from_variations(
+            &font,
+            variations.iter().map(|(tag, value)| Variation {
+                tag: HrTag::new(tag),
+                value: *value,
+            }),
+        );
+        let shaper_data = ShaperData::new(&font);
 
-        let units_per_em = rb.units_per_em() as f32;
-        let ascender = rb.ascender() as f32 / units_per_em;
-        let descender = rb.descender().unsigned_abs() as f32 / units_per_em;
+        let coords = instance.coords();
+        let units_per_em = font.head().ok()?.units_per_em() as f32;
+        let ascender = ascender(&font, coords) as f32 / units_per_em;
+        let descender = descender(&font, coords).unsigned_abs() as f32 / units_per_em;
         // Prefer the font's reported cap height; fall back to the ascender for
         // faces that omit it (or report a non-positive value).
-        let cap_height = rb
-            .capital_height()
+        let cap_height = capital_height(&font, coords)
             .filter(|&c| c > 0)
             .map_or(ascender, |c| c as f32 / units_per_em);
 
         let mut face = Self {
             krilla,
-            rb,
+            font,
+            shaper_data,
+            instance,
             cache: Mutex::new(HashMap::new()),
             units_per_em,
             ascender,
@@ -147,14 +165,18 @@ impl Face {
         if let Some(hit) = self.cache.lock().unwrap().get(text) {
             return hit.clone();
         }
-        let face = &self.rb;
+        let shaper = self
+            .shaper_data
+            .shaper(&self.font)
+            .instance(Some(&self.instance))
+            .build();
 
         let mut buffer = UnicodeBuffer::new();
         buffer.push_str(text);
         buffer.guess_segment_properties();
         buffer.set_direction(Direction::LeftToRight);
 
-        let output = rustybuzz::shape(face, &[], buffer);
+        let output = shaper.shape(buffer, ShapeOptions::new());
         let positions = output.glyph_positions();
         let infos = output.glyph_infos();
 
@@ -194,12 +216,88 @@ impl Face {
     }
 }
 
-fn rb_variations(variations: &[(AxisTag, f32)]) -> Vec<Variation> {
-    variations
-        .iter()
-        .map(|(tag, value)| Variation {
-            tag: RbTag::from_bytes(tag),
-            value: *value,
-        })
-        .collect()
+// Vertical metrics: prefer the OS/2 typographic metrics when the
+// USE_TYPO_METRICS flag is set, otherwise hhea, with the OS/2 typographic and
+// Windows metrics as fallbacks for zero hhea values. MVAR deltas apply at
+// non-default variation coordinates.
+
+fn ascender(font: &FontRef, coords: &[NormalizedCoord]) -> i16 {
+    let os2 = font.os2().ok();
+    if let Some(os2) = &os2
+        && os2.version() >= 4
+        && os2
+            .fs_selection()
+            .contains(SelectionFlags::USE_TYPO_METRICS)
+    {
+        return apply_metric_delta(font, coords, b"hasc", os2.s_typo_ascender());
+    }
+    let mut value = font.hhea().map_or(0, |hhea| hhea.ascender().to_i16());
+    if value == 0
+        && let Some(os2) = &os2
+    {
+        value = os2.s_typo_ascender();
+        if value == 0 {
+            value = apply_metric_delta(font, coords, b"hcla", os2.us_win_ascent() as i16);
+        } else {
+            value = apply_metric_delta(font, coords, b"hasc", value);
+        }
+    }
+    value
+}
+
+fn descender(font: &FontRef, coords: &[NormalizedCoord]) -> i16 {
+    let os2 = font.os2().ok();
+    if let Some(os2) = &os2
+        && os2.version() >= 4
+        && os2
+            .fs_selection()
+            .contains(SelectionFlags::USE_TYPO_METRICS)
+    {
+        return apply_metric_delta(font, coords, b"hdsc", os2.s_typo_descender());
+    }
+    let mut value = font.hhea().map_or(0, |hhea| hhea.descender().to_i16());
+    if value == 0
+        && let Some(os2) = &os2
+    {
+        value = os2.s_typo_descender();
+        if value == 0 {
+            // usWinDescent is positive-below-baseline; negate to match the
+            // hhea sign convention.
+            value = apply_metric_delta(font, coords, b"hcld", -(os2.us_win_descent() as i16));
+        } else {
+            value = apply_metric_delta(font, coords, b"hdsc", value);
+        }
+    }
+    value
+}
+
+fn capital_height(font: &FontRef, coords: &[NormalizedCoord]) -> Option<i16> {
+    font.os2()
+        .ok()
+        .and_then(|os2| os2.s_cap_height())
+        .map(|value| apply_metric_delta(font, coords, b"cpht", value))
+}
+
+/// Add the MVAR delta for `tag` at `coords` to a metric, keeping the
+/// unadjusted value when the result would overflow.
+fn apply_metric_delta(
+    font: &FontRef,
+    coords: &[NormalizedCoord],
+    tag: &[u8; 4],
+    value: i16,
+) -> i16 {
+    if coords.is_empty() {
+        return value;
+    }
+    let delta = font
+        .mvar()
+        .ok()
+        .and_then(|mvar| mvar.metric_delta(HrTag::new(tag), coords).ok())
+        .map_or(0.0, |delta| delta.to_f64() as f32);
+    let adjusted = value as f32 + delta;
+    if adjusted >= i16::MIN as f32 && adjusted <= i16::MAX as f32 {
+        adjusted as i16
+    } else {
+        value
+    }
 }

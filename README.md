@@ -5,7 +5,7 @@ code, using a small imperative Rust API for content and plain Rust code for the
 design.
 
 It is built on [`krilla`](https://crates.io/crates/krilla) (PDF backend) and
-[`rustybuzz`](https://crates.io/crates/rustybuzz) (text shaping and measurement).
+[`harfrust`](https://crates.io/crates/harfrust) (text shaping and measurement).
 
 The bundled example is a multi-page field guide to the mantis shrimp; see
 [`tests/render_example.rs`](tests/render_example.rs) for the full document built
@@ -54,18 +54,18 @@ build ─▶ model ─▶ layout ─▶ render ─▶ PDF
 | --- | --- |
 | [`build`](src/build/) | Imperative builder API for assembling a document from Rust |
 | [`model`](src/model.rs) | Layout-agnostic document types (`Block`, `Inline`, `Table`, `TaskItem`, `Chrome`) |
-| [`fonts`](src/fonts/) | Load fonts; shape and measure text with `rustybuzz` |
+| [`fonts`](src/fonts/) | Load fonts; shape and measure text with `harfrust` |
 | [`layout`](src/layout/) | Turn blocks into positioned pages of drawing primitives (line breaking, tables, pagination) |
 | [`render`](src/render.rs) | Paint the primitives into a PDF with krilla; add the running header and footer |
 | [`theme`](src/theme/) | Configurable design tokens (`Theme`): font sizes, colors, spacing, table/checkbox metrics, and per-table `TableStyle`s |
 
 Two design choices worth knowing:
 
-- **Shaping is done with `rustybuzz`, not krilla.** krilla can draw glyphs but
+- **Shaping is done with `harfrust`, not krilla.** krilla can draw glyphs but
   keeps its font metrics private, so line breaking and column sizing need their
-  own measurement path. We shape with the same shaper krilla uses internally
-  (pinned to the same version), so the widths we measure match exactly what
-  krilla draws.
+  own measurement path. We shape with HarfBuzz's official Rust port, built on
+  the same fontations font-parsing stack krilla uses, so the widths we measure
+  match exactly what krilla draws.
 - **Layout is separated from PDF emission** by an intermediate display list
   (pages of `Text` / `Rect` / `Stroke` elements). This keeps the layout logic
   unit-testable without a PDF backend, and lets the renderer fill in the
@@ -112,7 +112,7 @@ axis, so no separate bold/italic files are needed:
 | `Mono` | monospace | 400 |
 
 Variation coordinates are applied both when embedding the font (krilla's
-`Font::new_variable`) and before every shaping pass (`rustybuzz`), so measurement
+`Font::new_variable`) and before every shaping pass (`harfrust`), so measurement
 and drawing always agree on the exact instance.
 
 Three constructors, from most to least convenient:

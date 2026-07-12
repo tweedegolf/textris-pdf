@@ -1,9 +1,9 @@
 //! Font loading, text shaping and measurement.
 //!
 //! krilla can *draw* glyphs but keeps its font metrics private, so shaping is
-//! done here with `rustybuzz`, the same shaper krilla uses internally, pinned
-//! to the same version and the widths the layout engine measures match what
-//! krilla draws.
+//! done here with `harfrust` (HarfBuzz's official Rust port), built on the
+//! same fontations font-parsing stack krilla uses, so the widths the layout
+//! engine measures match what krilla draws.
 //!
 //! No typeface is baked into the library. Supply your own with one of the
 //! constructors: [`Fonts::from_variable_files`], [`Fonts::from_variable`], or

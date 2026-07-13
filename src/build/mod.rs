@@ -374,6 +374,31 @@ impl Textris {
         self
     }
 
+    /// Build a two-column label table imperatively, one field per line. Reads
+    /// more clearly than a [`label_table`](Self::label_table) literal when the
+    /// rows mix filled values, blank fill-in lines, and roomy spaces, since each
+    /// method names the kind of value:
+    ///
+    /// ```
+    /// # use textris_pdf::build::Textris;
+    /// # use textris_pdf::theme::em;
+    /// let mut doc = Textris::new();
+    /// doc.label_table_with(|t| {
+    ///     t.value("Observer", "Costa, R.");
+    ///     t.value("Location", "Lembeh Strait, Indonesia");
+    ///     t.fill_in("Date");
+    ///     t.fill_in("Depth");
+    ///     t.spacer("Field notes", em(6.0));
+    ///     t.fill_in("Signature");
+    /// });
+    /// ```
+    pub fn label_table_with(&mut self, build: impl FnOnce(&mut LabelTableBuilder)) -> &mut Self {
+        let mut builder = LabelTableBuilder::default();
+        build(&mut builder);
+        self.doc.blocks.push(Block::Table(builder.finish()));
+        self
+    }
+
     /// Add a plain bullet list. Each item is any [`IntoText`].
     pub fn bullet_list<I, C>(&mut self, list: I) -> &mut Self
     where
@@ -564,6 +589,33 @@ impl Textris {
         let docx = self.to_docx()?;
         std::fs::write(path, docx)
     }
+
+    /// Export the document as a GitHub-flavored Markdown string.
+    ///
+    /// This is a structural export (headings, paragraphs, tables, lists and
+    /// boxes) rather than a faithful reproduction of the PDF's styling; see the
+    /// [`markdown`](crate::markdown) module for the encoding choices taken.
+    /// Section references are resolved first, but the headings are left
+    /// unnumbered (Markdown renderers commonly number headings themselves), so
+    /// this uses
+    /// [`resolve_sections_unnumbered`](crate::model::Document::resolve_sections_unnumbered)
+    /// rather than the numbering pass [`render`](Self::render) uses.
+    ///
+    /// Requires the `markdown` cargo feature.
+    #[cfg(feature = "markdown")]
+    pub fn to_markdown(&self) -> String {
+        let mut doc = self.doc.clone();
+        doc.resolve_sections_unnumbered();
+        crate::markdown::to_markdown(&doc)
+    }
+
+    /// Export the document as Markdown and write it to `path`.
+    ///
+    /// Requires the `markdown` cargo feature.
+    #[cfg(feature = "markdown")]
+    pub fn write_markdown_to_file(&self, path: impl AsRef<Path>) -> io::Result<()> {
+        std::fs::write(path, self.to_markdown())
+    }
 }
 
 /// A table under construction, handed to the closure of [`Textris::table_with`].
@@ -607,6 +659,48 @@ impl TableBuilder {
         Table {
             style: self.style,
             headers: self.headers,
+            rows: self.rows,
+        }
+    }
+}
+
+/// A two-column label table under construction, handed to the closure of
+/// [`Textris::label_table_with`]. Each method appends one label row: a label in
+/// the left column and a value of the named kind on the right.
+#[derive(Debug, Default)]
+pub struct LabelTableBuilder {
+    rows: Vec<Vec<Cell>>,
+}
+
+impl LabelTableBuilder {
+    /// Append a labeled value: `label` on the left, `value` on the right. Both
+    /// are any [`IntoText`].
+    pub fn value(&mut self, label: impl IntoText, value: impl IntoText) -> &mut Self {
+        self.rows.push(vec![cell(label), cell(value)]);
+        self
+    }
+
+    /// Append a label whose value is a blank line to fill in (see [`fill_in`]).
+    /// Fill-in rows are given a standard minimum height (the theme's
+    /// [`TableMetrics::fill_in_min_height`](crate::theme::TableMetrics)) so
+    /// there is room to write above the line.
+    pub fn fill_in(&mut self, label: impl IntoText) -> &mut Self {
+        self.rows.push(vec![cell(label), Cell::FillIn]);
+        self
+    }
+
+    /// Append a label whose value is empty but forces the row to be at least
+    /// `height` points tall (see [`spacer`]), e.g. a roomy field-notes area.
+    pub fn spacer(&mut self, label: impl IntoText, height: f32) -> &mut Self {
+        self.rows.push(vec![cell(label), Cell::Spacer(height)]);
+        self
+    }
+
+    fn finish(self) -> Table {
+        let columns = self.rows.iter().map(Vec::len).max().unwrap_or(0);
+        Table {
+            style: TableStyle::label(),
+            headers: vec![Cell::Blank; columns],
             rows: self.rows,
         }
     }
@@ -670,6 +764,24 @@ mod tests {
             panic!()
         };
         assert_eq!(table.style, TableStyle::label());
+    }
+
+    #[test]
+    fn label_table_with_builds_label_styled_rows() {
+        let mut doc = Textris::new();
+        doc.label_table_with(|t| {
+            t.value("Observer", "Costa, R.");
+            t.fill_in("Date");
+            t.spacer("Field notes", 60.0);
+        });
+        let Block::Table(table) = &doc.document().blocks[0] else {
+            panic!()
+        };
+        assert_eq!(table.style, TableStyle::label());
+        assert_eq!(table.headers, vec![Cell::Blank, Cell::Blank]);
+        assert_eq!(plain_text(table.rows[0][1].inlines()), "Costa, R.");
+        assert!(matches!(table.rows[1][1], Cell::FillIn));
+        assert!(matches!(table.rows[2][1], Cell::Spacer(60.0)));
     }
 
     #[test]

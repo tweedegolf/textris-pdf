@@ -35,6 +35,8 @@ pub mod build;
 pub mod docx;
 pub mod fonts;
 pub mod layout;
+#[cfg(feature = "markdown")]
+pub mod markdown;
 pub mod model;
 pub mod render;
 pub mod theme;

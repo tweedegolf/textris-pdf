@@ -252,6 +252,9 @@ pub struct TableMetrics {
     pub inset_y: f32,
     /// Minimum height of a row's content area.
     pub row_min_height: f32,
+    /// Minimum content height of a row holding a fill-in cell, so there is room
+    /// to write above the line.
+    pub fill_in_min_height: f32,
 }
 
 impl Default for TableMetrics {
@@ -260,6 +263,7 @@ impl Default for TableMetrics {
             inset_x: em(0.75),
             inset_y: em(0.42),
             row_min_height: em(1.0),
+            fill_in_min_height: em(3.0),
         }
     }
 }

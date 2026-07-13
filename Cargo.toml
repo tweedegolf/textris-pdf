@@ -1,6 +1,6 @@
 [package]
 name = "textris-pdf"
-version = "0.4.0"
+version = "0.5.0"
 license = "MIT"
 edition = "2024"
 
@@ -11,4 +11,6 @@ read-fonts = "0.41.0"
 docx-rs = { version = "0.4.20", optional = true }
 
 [features]
+default = ["markdown"]
 docx = ["dep:docx-rs"]
+markdown = []

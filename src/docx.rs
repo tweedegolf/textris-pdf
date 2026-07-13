@@ -29,8 +29,8 @@ use std::io::{self, Cursor};
 
 use docx_rs::{
     AlignmentType, BreakType, Docx, FieldCharType, Footer, Header, InstrNUMPAGES, InstrPAGE,
-    InstrText, LineSpacing, LineSpacingType, PageMargin, Paragraph, Run, RunFonts, Shading, ShdType,
-    SpecialIndentType, Table as DocxTable, TableCell, TableRow, WidthType,
+    InstrText, LineSpacing, LineSpacingType, PageMargin, Paragraph, Run, RunFonts, Shading,
+    ShdType, SpecialIndentType, Table as DocxTable, TableCell, TableRow, WidthType,
 };
 use krilla::color::rgb;
 

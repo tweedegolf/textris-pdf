@@ -302,9 +302,18 @@ impl Engine<'_> {
         #[allow(clippy::needless_range_loop)] // reads parallel per-column arrays
         for c in 0..columns {
             let cell = cells.get(c);
-            if let Some(Cell::Spacer(height)) = cell {
-                content = content.max(*height);
-                continue;
+            match cell {
+                Some(Cell::Spacer(height)) => {
+                    content = content.max(*height);
+                    continue;
+                }
+                // A fill-in field is empty, but gets a standard minimum height
+                // so there is room to write above its line.
+                Some(Cell::FillIn) => {
+                    content = content.max(self.theme.table.fill_in_min_height);
+                    continue;
+                }
+                _ => {}
             }
             let avail = self.cell_available_width(widths[c], c, style);
             let words = self.tokenize(

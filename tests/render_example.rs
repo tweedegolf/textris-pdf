@@ -1,7 +1,8 @@
 //! Integration test that doubles as the document generator: it assembles a
 //! multi-page field guide to the mantis shrimp with the imperative
 //! [`textris_pdf::build`] API, renders it end-to-end, and writes the resulting
-//! PDF (and, with the `docx` feature, a `.docx`) to disk.
+//! PDF (and, with the `docx` and `markdown` features, a `.docx` and a `.md`) to
+//! disk.
 //!
 //! Run just this test to (re)generate the files:
 //!
@@ -20,7 +21,7 @@
 use std::path::Path;
 
 use textris_pdf::{
-    build::{Textris, bold, cell, fill_in, italic, mono, muted, spacer, text},
+    build::{Textris, bold, italic, mono, muted, text},
     fonts::Fonts,
     model::{ListMarker, SectionContent},
     theme::em,
@@ -61,6 +62,49 @@ fn renders_example_to_pdf_on_disk() {
 
         let out = root.join("tests/mantis-shrimp-example.docx");
         std::fs::write(&out, &docx).expect("should write docx to disk");
+        assert!(out.exists());
+    }
+
+    // And as GitHub-flavored Markdown when that feature is on.
+    #[cfg(feature = "markdown")]
+    {
+        let markdown = sample().to_markdown();
+
+        // It should carry the document's structure: the title heading, the
+        // callout as a blockquote, and a table.
+        assert!(
+            markdown.contains("# The Mantis Shrimp"),
+            "markdown is missing the title heading"
+        );
+        assert!(
+            markdown.contains("> **Handle with care.**"),
+            "markdown is missing the callout blockquote"
+        );
+        assert!(markdown.contains("| --- |"), "markdown is missing a table");
+        // Headings are not numbered (the "### 1. Classification" of the PDF is
+        // just "### Classification" here); references repeat the section title
+        // in quotes instead of a number.
+        assert!(
+            markdown.contains("### Classification"),
+            "markdown headings should not be numbered"
+        );
+        assert!(
+            markdown.contains(r#""Vision""#),
+            "references should repeat the section title in quotes"
+        );
+        // The footer contents sit at the bottom, below a rule.
+        assert!(
+            markdown.trim_end().ends_with("Revision: `3`"),
+            "footer contents should be at the bottom of the markdown"
+        );
+        assert!(
+            markdown.len() > 4000,
+            "markdown looks too small: {} bytes",
+            markdown.len()
+        );
+
+        let out = root.join("tests/mantis-shrimp-example.md");
+        std::fs::write(&out, &markdown).expect("should write markdown to disk");
         assert!(out.exists());
     }
 }
@@ -216,12 +260,11 @@ fn sample() -> Textris {
 
     // A highlighted warning, drawn as a boxed callout.
     doc.boxed(|b| {
-        b.paragraph(bold("Handle with care."));
-        b.paragraph(
+        b.paragraph(bold("Handle with care.").line_break().normal(
             "A large smasher can split a fingernail (hence the common name \
-             \"thumb splitter\") and has been known to crack the glass of an \
-             aquarium. Never pick one up by hand.",
-        );
+                    \"thumb splitter\") and has been known to crack the glass of an \
+                    aquarium. Never pick one up by hand.",
+        ));
     });
 
     // A bullet list previewing the guide's contents. The section numbers are
@@ -442,14 +485,15 @@ fn sample() -> Textris {
     // Section 11: a label table mixing prefilled cells, fill-in lines and a
     // tall spacer cell for free-form notes.
     doc.h3_numbered("Observation record");
-    doc.label_table([
-        [cell("Observer"), cell("Costa, R.")],
-        [cell("Location"), cell("Lembeh Strait, Indonesia")],
-        [cell("Date"), fill_in()],
-        [cell("Depth"), fill_in()],
-        [cell("Field notes"), spacer(em(6.0))],
-        [cell("Signature"), fill_in()],
-    ]);
+    doc.label_table_with(|t| {
+        t.value("Observer", "Costa, R.");
+        t.value("Location", "Lembeh Strait, Indonesia");
+        t.fill_in("Date");
+        t.fill_in("Depth");
+        t.fill_in("Signature");
+    });
+
+    doc.spacer(em(2.0));
 
     // Hard line breaks ('\n' or Text::line_break) keep an address inside one
     // paragraph.

@@ -39,29 +39,70 @@ impl Document {
     /// pass is idempotent because it clears the `numbered` flags and
     /// `section_ref` markers it resolves.
     pub fn resolve_sections(&mut self) {
+        self.resolve_sections_impl(true, RefStyle::Number);
+    }
+
+    /// Resolve section references to the referenced section's title, in quotes,
+    /// and leave the headings unnumbered.
+    ///
+    /// Like [`resolve_sections`](Self::resolve_sections) this replaces
+    /// [`section_ref`](Inline::section_ref) placeholders, but instead of a
+    /// section number it substitutes the referenced heading's title wrapped in
+    /// double quotes (e.g. `"Vision"`), and it does not prefix numbers onto the
+    /// headings. This suits output formats that number headings themselves, and
+    /// so have no visible section numbers to reference, such as Markdown.
+    pub fn resolve_sections_unnumbered(&mut self) {
+        self.resolve_sections_impl(false, RefStyle::QuotedTitle);
+    }
+
+    /// Shared body of the resolution passes: walk the numbered headings to
+    /// build the map from label to resolved reference text (a number or a
+    /// quoted title, per `ref_style`) and substitute the references.
+    /// `prefix_headings` controls whether section numbers are also prefixed
+    /// onto the headings themselves.
+    fn resolve_sections_impl(&mut self, prefix_headings: bool, ref_style: RefStyle) {
         let mut counters = [0usize; 6];
-        let mut numbers = HashMap::new();
-        number_headings(&mut self.blocks, &mut counters, &mut numbers);
-        resolve_refs_in_blocks(&mut self.blocks, &numbers);
+        let mut refs = HashMap::new();
+        number_headings(
+            &mut self.blocks,
+            &mut counters,
+            &mut refs,
+            prefix_headings,
+            ref_style,
+        );
+        resolve_refs_in_blocks(&mut self.blocks, &refs);
         for section in [&mut self.header, &mut self.footer] {
             for content in [&mut section.left, &mut section.center, &mut section.right]
                 .into_iter()
                 .flatten()
             {
                 if let SectionContent::Spans(spans) = content {
-                    resolve_refs_in_inlines(spans, &numbers);
+                    resolve_refs_in_inlines(spans, &refs);
                 }
             }
         }
     }
 }
 
-/// Assign numbers to numbered headings, prefixing them to the heading text and
-/// recording labeled sections in `numbers`.
+/// How a [`section_ref`](Inline::section_ref) placeholder is resolved.
+#[derive(Debug, Clone, Copy)]
+enum RefStyle {
+    /// Substitute the section's hierarchical number (e.g. `3.1`).
+    Number,
+    /// Substitute the section's heading title, in double quotes (e.g.
+    /// `"Vision"`).
+    QuotedTitle,
+}
+
+/// Walk the numbered headings, recording each labeled section's resolved
+/// reference text (a number or a quoted title, per `ref_style`) in `refs` and,
+/// when `prefix` is set, prefixing the number to the heading text.
 fn number_headings(
     blocks: &mut [Block],
     counters: &mut [usize; 6],
-    numbers: &mut HashMap<String, String>,
+    refs: &mut HashMap<String, String>,
+    prefix: bool,
+    ref_style: RefStyle,
 ) {
     for block in blocks {
         match block {
@@ -82,33 +123,44 @@ fn number_headings(
                     .map(usize::to_string)
                     .collect::<Vec<_>>()
                     .join(".");
-                content.insert(0, Inline::new(format!("{number}. ")));
+                // Record the reference text before any number prefix is added,
+                // so a title reference is the clean heading text.
                 if let Some(label) = label.take() {
-                    numbers.insert(label, number);
+                    let resolved = match ref_style {
+                        RefStyle::Number => number.clone(),
+                        RefStyle::QuotedTitle => format!("\"{}\"", plain_text(content)),
+                    };
+                    refs.insert(label, resolved);
+                }
+                if prefix {
+                    content.insert(0, Inline::new(format!("{number}. ")));
                 }
                 *numbered = false;
             }
-            Block::Box { content, .. } => number_headings(content, counters, numbers),
+            Block::Box { content, .. } => {
+                number_headings(content, counters, refs, prefix, ref_style)
+            }
             _ => {}
         }
     }
 }
 
-/// Replace section-reference placeholder runs with their section number.
-fn resolve_refs_in_blocks(blocks: &mut [Block], numbers: &HashMap<String, String>) {
+/// Replace section-reference placeholder runs with their resolved text (a
+/// number or a quoted title, per the pass that built `refs`).
+fn resolve_refs_in_blocks(blocks: &mut [Block], refs: &HashMap<String, String>) {
     for block in blocks {
         match block {
             Block::Heading { content, .. } | Block::Paragraph(content) => {
-                resolve_refs_in_inlines(content, numbers)
+                resolve_refs_in_inlines(content, refs)
             }
             Block::TaskList(items) => {
                 for item in items {
-                    resolve_refs_in_inlines(&mut item.content, numbers);
+                    resolve_refs_in_inlines(&mut item.content, refs);
                 }
             }
             Block::BulletList(items) | Block::OrderedList { items, .. } => {
                 for item in items {
-                    resolve_refs_in_inlines(item, numbers);
+                    resolve_refs_in_inlines(item, refs);
                 }
             }
             Block::Table(table) => {
@@ -118,22 +170,22 @@ fn resolve_refs_in_blocks(blocks: &mut [Block], numbers: &HashMap<String, String
                     .chain(table.rows.iter_mut().flatten())
                 {
                     if let Cell::Text(inlines) = cell {
-                        resolve_refs_in_inlines(inlines, numbers);
+                        resolve_refs_in_inlines(inlines, refs);
                     }
                 }
             }
-            Block::Box { content, .. } => resolve_refs_in_blocks(content, numbers),
+            Block::Box { content, .. } => resolve_refs_in_blocks(content, refs),
             Block::PageBreak | Block::Spacer(_) => {}
         }
     }
 }
 
-fn resolve_refs_in_inlines(inlines: &mut [Inline], numbers: &HashMap<String, String>) {
+fn resolve_refs_in_inlines(inlines: &mut [Inline], refs: &HashMap<String, String>) {
     for inline in inlines {
         if let Some(label) = &inline.section_ref
-            && let Some(number) = numbers.get(label)
+            && let Some(resolved) = refs.get(label)
         {
-            inline.text = number.clone();
+            inline.text = resolved.clone();
             inline.section_ref = None;
         }
     }
@@ -565,5 +617,37 @@ mod tests {
         assert_eq!(last[0].text, "1", "backward reference");
         assert_eq!(last[1].text, "??", "unknown labels keep the placeholder");
         assert!(last[1].section_ref.is_some());
+    }
+
+    #[test]
+    fn resolve_sections_unnumbered_leaves_headings_plain_and_refs_by_title() {
+        let reference = |label: &str| Inline {
+            section_ref: Some(label.into()),
+            ..Inline::new("??")
+        };
+        let mut doc = Document {
+            blocks: vec![
+                heading(3, "First", true, Some("a")),
+                heading(4, "Nested", true, None),
+                heading(3, "Second", true, None),
+                Block::Paragraph(vec![reference("a")]),
+            ],
+            ..Document::default()
+        };
+        doc.resolve_sections_unnumbered();
+
+        let heading_text = |i: usize| match &doc.blocks[i] {
+            Block::Heading { content, .. } => plain_text(content),
+            _ => panic!("expected a heading"),
+        };
+        // Headings keep their plain text, with no number prefixed.
+        assert_eq!(heading_text(0), "First");
+        assert_eq!(heading_text(1), "Nested");
+        assert_eq!(heading_text(2), "Second");
+        // The reference repeats the referenced heading's title, in quotes.
+        let Block::Paragraph(inlines) = &doc.blocks[3] else {
+            panic!("expected a paragraph");
+        };
+        assert_eq!(plain_text(inlines), "\"First\"");
     }
 }

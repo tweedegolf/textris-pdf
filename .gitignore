@@ -1,3 +1,5 @@
 /target
-*.pdf
-*.docx
+
+tests/*.pdf
+tests/*.docx
+tests/*.md

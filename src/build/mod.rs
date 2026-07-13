@@ -540,6 +540,30 @@ impl Textris {
         let pdf = self.render(fonts).map_err(io::Error::other)?;
         std::fs::write(path, pdf)
     }
+
+    /// Export the document as a Word `.docx` file, returning its bytes.
+    ///
+    /// This is a structural export (headings, paragraphs, tables, lists, boxes
+    /// and chrome) rather than a faithful reproduction of the PDF's styling;
+    /// see the [`docx`](crate::docx) module for the shortcuts taken. Section
+    /// numbering and references are resolved first, as in [`render`](Self::render).
+    ///
+    /// Requires the `docx` cargo feature.
+    #[cfg(feature = "docx")]
+    pub fn to_docx(&self) -> io::Result<Vec<u8>> {
+        let mut doc = self.doc.clone();
+        doc.resolve_sections();
+        crate::docx::to_docx(&doc)
+    }
+
+    /// Export the document as a Word `.docx` file and write it to `path`.
+    ///
+    /// Requires the `docx` cargo feature.
+    #[cfg(feature = "docx")]
+    pub fn write_docx_to_file(&self, path: impl AsRef<Path>) -> io::Result<()> {
+        let docx = self.to_docx()?;
+        std::fs::write(path, docx)
+    }
 }
 
 /// A table under construction, handed to the closure of [`Textris::table_with`].

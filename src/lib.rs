@@ -31,6 +31,8 @@
 //! ```
 
 pub mod build;
+#[cfg(feature = "docx")]
+pub mod docx;
 pub mod fonts;
 pub mod layout;
 pub mod model;

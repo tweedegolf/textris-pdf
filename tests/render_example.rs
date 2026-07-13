@@ -1,9 +1,9 @@
 //! Integration test that doubles as the document generator: it assembles a
 //! multi-page field guide to the mantis shrimp with the imperative
-//! [`textris_pdf::build`] API, renders it end-to-end, and writes the resulting PDF
-//! to disk.
+//! [`textris_pdf::build`] API, renders it end-to-end, and writes the resulting
+//! PDF (and, with the `docx` feature, a `.docx`) to disk.
 //!
-//! Run just this test to (re)generate the PDF:
+//! Run just this test to (re)generate the files:
 //!
 //! ```text
 //! cargo test --test render_example -- renders_example_to_pdf_on_disk
@@ -43,6 +43,26 @@ fn renders_example_to_pdf_on_disk() {
     let out = root.join("tests/mantis-shrimp-example.pdf");
     std::fs::write(&out, &pdf).expect("should write PDF to disk");
     assert!(out.exists());
+
+    // Also export the same document as a Word file when the feature is on.
+    #[cfg(feature = "docx")]
+    {
+        let docx = sample()
+            .to_docx()
+            .expect("document should export as a .docx");
+
+        // A .docx is a ZIP archive: it starts with the "PK" local-file signature.
+        assert_eq!(&docx[..2], b"PK", "output is not a .docx (ZIP) file");
+        assert!(
+            docx.len() > 4000,
+            "docx looks too small: {} bytes",
+            docx.len()
+        );
+
+        let out = root.join("tests/mantis-shrimp-example.docx");
+        std::fs::write(&out, &docx).expect("should write docx to disk");
+        assert!(out.exists());
+    }
 }
 
 /// Load the fonts the example uses, Newsreader (roman + italic variable fonts)

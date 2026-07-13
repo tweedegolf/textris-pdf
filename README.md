@@ -11,6 +11,8 @@ The bundled example is a multi-page field guide to the mantis shrimp; see
 [`tests/render_example.rs`](tests/render_example.rs) for the full document built
 with the API and the generated `tests/mantis-shrimp-example.pdf` for the output.
 
+![The three pages of the bundled mantis shrimp field guide](docs/mantis-shrimp-example.png)
+
 ## Quick start
 
 ```rust

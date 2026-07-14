@@ -1,8 +1,9 @@
 # textris-pdf
 
-A lightweight, opinionated document renderer that builds a clean **PDF** from Rust
-code, using a small imperative Rust API for content and plain Rust code for the
-design.
+A lightweight, opinionated document renderer that builds a clean, **accessible
+PDF** from Rust code, using a small imperative Rust API for content and plain
+Rust code for the design. Output is a fully tagged **PDF/A-2A + PDF/UA-1** file:
+archival-grade and navigable by screen readers.
 
 It is built on [`krilla`](https://crates.io/crates/krilla) (PDF backend) and
 [`harfrust`](https://crates.io/crates/harfrust) (text shaping and measurement).
@@ -58,7 +59,7 @@ build ─▶ model ─▶ layout ─▶ render ─▶ PDF
 | [`model`](src/model.rs) | Layout-agnostic document types (`Block`, `Inline`, `Table`, `TaskItem`, `Chrome`) |
 | [`fonts`](src/fonts/) | Load fonts; shape and measure text with `harfrust` |
 | [`layout`](src/layout/) | Turn blocks into positioned pages of drawing primitives (line breaking, tables, pagination) |
-| [`render`](src/render.rs) | Paint the primitives into a PDF with krilla; add the running header and footer |
+| [`render`](src/render.rs) | Paint the primitives into a tagged PDF with krilla; add the running header and footer, structure tree, metadata and outline |
 | [`theme`](src/theme/) | Configurable design tokens (`Theme`): font sizes, colors, spacing, table/checkbox metrics, and per-table `TableStyle`s |
 
 Two design choices worth knowing:
@@ -72,6 +73,12 @@ Two design choices worth knowing:
   (pages of `Text` / `Rect` / `Stroke` elements). This keeps the layout logic
   unit-testable without a PDF backend, and lets the renderer fill in the
   `Page N of M` counter once the total page count is known.
+- **Accessibility is derived, not bolted on.** Alongside the display list, layout
+  produces a logical structure tree (headings, paragraphs, lists, tables) in
+  reading order and a heading outline. The renderer wraps every drawn run in a
+  marked-content sequence — real content linked to its structure node, page
+  furniture marked as an artifact — so the output is a valid tagged PDF. See
+  [Accessibility](#accessibility).
 
 ## The builder API
 
@@ -89,6 +96,7 @@ Documents are assembled with [`Textris`](src/build/mod.rs):
 | `task_list(items)` | Task list with filled / outlined checkboxes |
 | `header_left/center/right(content)` | Running header shown on every page |
 | `footer_left/center/right(content)` | Running footer shown on every page |
+| `title(text)` / `language(tag)` | Document title and language for the PDF metadata (see [Accessibility](#accessibility)) |
 
 Anywhere text is accepted you can pass a plain `&str` for a regular run, or build
 mixed emphasis with the [`Text`](src/build/text.rs) builder and the `text` / `bold` /
@@ -97,6 +105,41 @@ mixed emphasis with the [`Text`](src/build/text.rs) builder and the `text` / `bo
 Header and footer sections additionally accept
 `SectionContent::page_counter(|page, total| …)` for a `Page N of M` counter,
 filled in once the total page count is known.
+
+## Accessibility
+
+Every document renders to a **tagged PDF** that conforms to both **PDF/A-2A**
+(the accessible archival profile of PDF 1.7) and **PDF/UA-1** (the universal
+accessibility standard). krilla validates against both while serializing, so a
+successful render is a conformant file — a violation surfaces as a `RenderError`
+rather than a silently broken document.
+
+What that gives you, for free, from the ordinary builder calls:
+
+- **Logical structure & reading order.** Headings (`H1`–`Hn`), paragraphs (`P`),
+  lists (`L` → `LI` → `Lbl` + `LBody`) and tables (`Table` → `TR` → `TH`/`TD`,
+  with header cells scoped to their column) are emitted as a structure tree in
+  reading order, independent of where things land on the page.
+- **Marked content everywhere.** Text is tagged content linked to its structure
+  node; backgrounds, rules, checkboxes and the running header/footer are marked
+  as artifacts and excluded from the reading order. A table header repeated atop
+  a continuation page is tagged once and redrawn as an artifact, so assistive
+  technology reads it a single time.
+- **Metadata & navigation.** The document title (shown by viewers), language,
+  and a creation date are written to the metadata, and a bookmark outline is
+  built from the headings.
+
+Set the title and language explicitly; both are required for full conformance
+and improve the reading experience:
+
+```rust
+let mut doc = Textris::new();
+doc.title("The Mantis Shrimp: A Field Guide");
+doc.language("en"); // BCP 47 / RFC 3066 tag, e.g. "en", "en-GB", "nl"
+```
+
+If you leave the title unset it falls back to the first heading; the language
+defaults to `"en"`.
 
 ## Fonts
 

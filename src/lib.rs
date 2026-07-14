@@ -9,7 +9,8 @@
 //! 1. [`build`] assembles a [`model::Document`] block by block.
 //! 2. [`layout`] turns that model into positioned pages of drawing primitives,
 //!    using [`fonts`] for text measurement.
-//! 3. [`render`] paints those primitives into a PDF/A-2b file with krilla.
+//! 3. [`render`] paints those primitives into a tagged, accessible PDF/A-2A +
+//!    PDF/UA-1 file with krilla.
 //!
 //! [`theme`] holds the visual design tokens shared across stages, plus the
 //! per-element styles ([`theme::TableStyle`], [`theme::BoxStyle`]).

@@ -1,11 +1,11 @@
 //! Table layout: column sizing (auto, label and custom models), row heights,
 //! page-breaking with repeated headers, and row emission.
 
-use krilla::color::rgb;
+use krilla::{color::rgb, tagging::TableHeaderScope};
 
 use crate::{
     fonts::Style,
-    layout::{Element, Engine},
+    layout::{Element, Engine, StructTag, Tagging},
     model::{Cell, Table},
     theme::{Align, ColumnWidth, ColumnWidths, TableStyle},
 };
@@ -100,7 +100,13 @@ impl Engine<'_> {
         let header_height =
             has_header.then(|| self.row_height(&table.headers, &widths, columns, &header_style));
 
+        self.structure.open(StructTag::Table);
+
+        // The header row is tagged once, on its first appearance, as header
+        // cells scoped to their column. When it repeats after a page break it
+        // is redrawn as an artifact so assistive tech reads it only once.
         if let Some(header_height) = header_height {
+            let tags = self.push_row_structure(Some(TableHeaderScope::Column), columns);
             self.emit_row(
                 &table.headers,
                 &xs,
@@ -108,8 +114,10 @@ impl Engine<'_> {
                 columns,
                 &header_style,
                 header_height,
+                &tags,
             );
         }
+        let repeat_header_tags = vec![Tagging::Artifact; columns];
 
         for (index, row) in table.rows.iter().enumerate() {
             let fill = if style.striped && index % 2 == 0 {
@@ -132,11 +140,38 @@ impl Engine<'_> {
                         columns,
                         &header_style,
                         header_height,
+                        &repeat_header_tags,
                     );
                 }
             }
-            self.emit_row(row, &xs, &widths, columns, &row_style, height);
+            let tags = self.push_row_structure(None, columns);
+            self.emit_row(row, &xs, &widths, columns, &row_style, height, &tags);
         }
+
+        self.structure.close();
+    }
+
+    /// Add a table row to the structure tree with one cell per column, and
+    /// return the [`Tagging`] each column's content should carry. `header` gives
+    /// the header-cell scope when this is a header row, or `None` for a body row
+    /// of data cells.
+    fn push_row_structure(
+        &mut self,
+        header: Option<TableHeaderScope>,
+        columns: usize,
+    ) -> Vec<Tagging> {
+        self.structure.open(StructTag::TableRow);
+        let tags = (0..columns)
+            .map(|_| {
+                let tag = match header {
+                    Some(scope) => StructTag::TableHeaderCell(scope),
+                    None => StructTag::TableCell,
+                };
+                Tagging::Content(self.structure.leaf(tag))
+            })
+            .collect();
+        self.structure.close();
+        tags
     }
 
     /// Compute the width of every column within the given total content width.
@@ -330,6 +365,8 @@ impl Engine<'_> {
 
     /// Draw one table row at the current pen position and advance past it.
     /// `height` is the row's height, as computed by [`row_height`](Self::row_height).
+    /// `tags` gives the structure tagging for each column's text (one entry per
+    /// column), so cells land in their header/data cell in the structure tree.
     #[allow(clippy::too_many_arguments)]
     fn emit_row(
         &mut self,
@@ -339,6 +376,7 @@ impl Engine<'_> {
         columns: usize,
         style: &RowStyle,
         height: f32,
+        tags: &[Tagging],
     ) {
         let top = self.y;
 
@@ -360,6 +398,9 @@ impl Engine<'_> {
         let inset_y = self.theme.table.inset_y;
         let text_color = self.theme.palette.text;
         for c in 0..columns {
+            // Text drawn below lands in this column's structure cell; the fill
+            // and fill-in line drawn as strokes/rects stay artifacts regardless.
+            self.current_tag = tags[c];
             let inset_left = self.cell_inset_left(c, style);
             let cell = match cells.get(c) {
                 Some(Cell::FillIn) => {

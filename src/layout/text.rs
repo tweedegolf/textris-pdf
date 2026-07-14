@@ -134,6 +134,7 @@ impl Engine<'_> {
                 style,
                 glyphs,
                 text,
+                tag: self.current_tag,
             }));
             x += width;
             index = run_end;

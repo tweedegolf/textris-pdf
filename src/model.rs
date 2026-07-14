@@ -22,6 +22,14 @@ pub struct Document {
     pub footer: Chrome,
     /// Design tokens used to lay out and render the document.
     pub theme: Theme,
+    /// The document title, written to the PDF metadata and shown by viewers.
+    /// Required for the accessible (PDF/UA) output; when unset the renderer
+    /// falls back to the first heading's text.
+    pub title: Option<String>,
+    /// The document's primary natural language as a BCP 47 / RFC 3066 tag (e.g.
+    /// `"en"`, `"en-GB"`), written to the PDF metadata. Required for accessible
+    /// output; defaults to `"en"` when unset.
+    pub language: Option<String>,
 }
 
 impl Document {

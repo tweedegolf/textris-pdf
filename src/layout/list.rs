@@ -2,11 +2,11 @@
 //! and ordered lists, which share their geometry and differ only in the marker
 //! text drawn in the indent).
 
-use krilla::color::rgb;
+use krilla::{color::rgb, tagging::ListNumbering};
 
 use crate::{
     fonts::Style,
-    layout::{Element, Engine, TextElement},
+    layout::{Element, Engine, StructTag, Tagging, TextElement},
     model::{Inline, ListMarker, TaskItem},
 };
 
@@ -36,15 +36,22 @@ impl Engine<'_> {
 
     pub(super) fn layout_task_list(&mut self, items: &[TaskItem]) {
         let gap = self.theme.list.task_gap;
+        // A checklist is a list with no visible numbering; each item's drawn
+        // checkbox is decorative (an artifact) and its text is the item body.
+        self.structure.open(StructTag::List(ListNumbering::None));
         for (index, item) in items.iter().enumerate() {
             if index > 0 {
                 self.y += gap;
             }
-            self.layout_task_item(item);
+            self.structure.open(StructTag::ListItem);
+            let body = self.structure.leaf(StructTag::Body);
+            self.layout_task_item(item, Tagging::Content(body));
+            self.structure.close();
         }
+        self.structure.close();
     }
 
-    fn layout_task_item(&mut self, item: &TaskItem) {
+    fn layout_task_item(&mut self, item: &TaskItem, body_tag: Tagging) {
         let size = self.theme.font_size.body;
         let line_h = size * self.theme.spacing.line_height;
         let box_size = self.theme.checkbox.size;
@@ -69,6 +76,7 @@ impl Engine<'_> {
         let box_y = band_center - box_size / 2.0;
         self.draw_checkbox(content_left, box_y, box_size, item.checked);
 
+        self.current_tag = body_tag;
         let mut line_top = top;
         for line in &lines {
             self.draw_line(line, text_x, line_top, size, text_color);
@@ -129,17 +137,28 @@ impl Engine<'_> {
     }
 
     pub(super) fn layout_bullet_list(&mut self, items: &[Vec<Inline>]) {
-        self.layout_marker_list(items, |_| "•".to_string());
+        self.layout_marker_list(items, ListNumbering::Disc, |_| "•".to_string());
     }
 
     pub(super) fn layout_ordered_list(&mut self, marker: ListMarker, items: &[Vec<Inline>]) {
-        self.layout_marker_list(items, |index| marker.label(index + 1));
+        let numbering = match marker {
+            ListMarker::Decimal => ListNumbering::Decimal,
+            ListMarker::LowerAlpha => ListNumbering::LowerAlpha,
+        };
+        self.layout_marker_list(items, numbering, |index| marker.label(index + 1));
     }
 
     /// Lay out a list whose items are indented text preceded by a marker
     /// ("•", "1.", "a.", …) drawn on the first line. `marker` maps the 0-based
-    /// item index to its marker text.
-    fn layout_marker_list(&mut self, items: &[Vec<Inline>], marker: impl Fn(usize) -> String) {
+    /// item index to its marker text; `numbering` records the list style in the
+    /// structure tree. Each item becomes a list item whose label holds the
+    /// marker and whose body holds the wrapped text.
+    fn layout_marker_list(
+        &mut self,
+        items: &[Vec<Inline>],
+        numbering: ListNumbering,
+        marker: impl Fn(usize) -> String,
+    ) {
         let size = self.theme.font_size.body;
         let line_h = size * self.theme.spacing.line_height;
         let content_left = self.left;
@@ -148,6 +167,7 @@ impl Engine<'_> {
         let text_color = self.theme.palette.text;
         let gap = self.theme.list.bullet_gap;
 
+        self.structure.open(StructTag::List(numbering));
         for (index, item) in items.iter().enumerate() {
             if index > 0 {
                 self.y += gap;
@@ -158,8 +178,11 @@ impl Engine<'_> {
             self.ensure(height);
             let top = self.y;
 
-            // Marker left-aligned in the indent, on the first line.
+            self.structure.open(StructTag::ListItem);
+
+            // Marker left-aligned in the indent, on the first line: the label.
             let label = marker(index);
+            let label_id = self.structure.leaf(StructTag::Label);
             let shaped = self.fonts.shape(Style::Regular, &label);
             let baseline = top + self.fonts.ascent(Style::Regular, size);
             self.push(Element::Text(TextElement {
@@ -170,14 +193,21 @@ impl Engine<'_> {
                 style: Style::Regular,
                 glyphs: shaped.glyphs,
                 text: label,
+                tag: Tagging::Content(label_id),
             }));
 
+            // The wrapped item text: the body.
+            let body_id = self.structure.leaf(StructTag::Body);
+            self.current_tag = Tagging::Content(body_id);
             let mut line_top = top;
             for line in &lines {
                 self.draw_line(line, text_x, line_top, size, text_color);
                 line_top += line_h;
             }
+
+            self.structure.close();
             self.y = top + height;
         }
+        self.structure.close();
     }
 }

@@ -15,19 +15,72 @@ mod table;
 mod tests;
 mod text;
 
-pub use display::{Element, Page, TextElement};
+pub use display::{
+    Element, Layout, NodeId, OutlineEntry, Page, StructNode, StructTag, Tagging, TextElement,
+};
 
 use crate::{
     fonts::{Fonts, Style},
-    model::{Block, Document},
+    model::{Block, Document, plain_text},
     theme::{BoxStyle, Theme},
 };
 
-/// Lay out a whole document into pages, using the document's own [`Theme`].
-pub fn layout(document: &Document, fonts: &Fonts) -> Vec<Page> {
+/// Lay out a whole document, using the document's own [`Theme`], into pages of
+/// drawing primitives plus the logical structure and outline needed to render a
+/// tagged, accessible PDF (see [`Layout`]).
+pub fn layout(document: &Document, fonts: &Fonts) -> Layout {
     let mut engine = Engine::new(fonts, &document.theme);
     engine.layout_document(document);
-    engine.pages
+    Layout {
+        pages: engine.pages,
+        structure: engine.structure.roots,
+        outline: engine.outline,
+        nodes: engine.structure.next_id,
+    }
+}
+
+/// Builds the logical structure tree incrementally as the engine walks the
+/// document. Grouping elements are opened and closed around their children;
+/// content leaves are allocated a [`NodeId`] the renderer collects
+/// marked-content into. Nodes are attached in reading order.
+#[derive(Default)]
+struct StructureBuilder {
+    /// Completed top-level nodes.
+    roots: Vec<StructNode>,
+    /// Currently open groups, innermost last; each holds its children so far.
+    stack: Vec<(StructTag, Vec<StructNode>)>,
+    /// The next content-leaf id to hand out (also the total id count).
+    next_id: NodeId,
+}
+
+impl StructureBuilder {
+    /// Add a content leaf under the innermost open group (or at the root) and
+    /// return its fresh [`NodeId`].
+    fn leaf(&mut self, tag: StructTag) -> NodeId {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.attach(StructNode::Leaf { tag, id });
+        id
+    }
+
+    /// Open a new grouping element; subsequent nodes attach inside it until the
+    /// matching [`close`](Self::close).
+    fn open(&mut self, tag: StructTag) {
+        self.stack.push((tag, Vec::new()));
+    }
+
+    /// Close the innermost open group and attach it to its parent.
+    fn close(&mut self) {
+        let (tag, children) = self.stack.pop().expect("close without a matching open");
+        self.attach(StructNode::Group { tag, children });
+    }
+
+    fn attach(&mut self, node: StructNode) {
+        match self.stack.last_mut() {
+            Some((_, children)) => children.push(node),
+            None => self.roots.push(node),
+        }
+    }
 }
 
 /// Which spacing rule applies before a block.
@@ -64,6 +117,14 @@ struct Engine<'a> {
     left: f32,
     /// Right edge of the current content region.
     right: f32,
+    /// The logical structure tree being assembled alongside the pages.
+    structure: StructureBuilder,
+    /// The structure node any emitted text run currently belongs to. Text is
+    /// tagged with this; it is set before drawing each block's content.
+    /// Defaults to [`Tagging::Artifact`] so stray text is never misattributed.
+    current_tag: Tagging,
+    /// Heading bookmarks collected for the outline, in document order.
+    outline: Vec<OutlineEntry>,
 }
 
 impl<'a> Engine<'a> {
@@ -75,6 +136,9 @@ impl<'a> Engine<'a> {
             y: theme.page.content_top(),
             left: theme.page.content_left(),
             right: theme.page.content_right(),
+            structure: StructureBuilder::default(),
+            current_tag: Tagging::Artifact,
+            outline: Vec::new(),
         }
     }
 
@@ -163,10 +227,27 @@ impl<'a> Engine<'a> {
         match block {
             Block::Heading { level, content, .. } => {
                 let size = self.theme.font_size.heading(*level);
+                let title = plain_text(content);
+                let id = self.structure.leaf(StructTag::Heading {
+                    level: *level,
+                    title: title.clone(),
+                });
+                // A section is pre-fitted by `layout_section` (and boxes are
+                // kept together), so the current page and pen are where the
+                // heading will actually be drawn: capture them for the bookmark.
+                self.outline.push(OutlineEntry {
+                    level: *level,
+                    title,
+                    page_index: self.pages.len() - 1,
+                    y: self.y,
+                });
+                self.current_tag = Tagging::Content(id);
                 self.layout_paragraph(content, size, true, false, text_color)
             }
             Block::Paragraph(inlines) => {
                 let size = self.theme.font_size.body;
+                let id = self.structure.leaf(StructTag::Paragraph);
+                self.current_tag = Tagging::Content(id);
                 self.layout_paragraph(inlines, size, false, false, text_color)
             }
             Block::Table(table) => self.layout_table(table),
@@ -261,12 +342,16 @@ impl<'a> Engine<'a> {
             fill: style.background,
         });
 
-        // Lay out the children within the padded inner region.
+        // Lay out the children within the padded inner region, grouped under a
+        // generic container in the structure tree. The background fill is drawn
+        // above as an artifact and is not part of the group.
         let (saved_left, saved_right) = (self.left, self.right);
         self.left = box_left + style.padding_x;
         self.right = box_right - style.padding_x;
         self.y = box_top + style.padding_y;
+        self.structure.open(StructTag::Div);
         self.layout_box_blocks(content);
+        self.structure.close();
         self.left = saved_left;
         self.right = saved_right;
 

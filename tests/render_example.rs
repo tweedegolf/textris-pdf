@@ -34,7 +34,7 @@ fn renders_example_to_pdf_on_disk() {
 
     let pdf = sample()
         .render(&fonts)
-        .expect("document should render as valid PDF/A-2b");
+        .expect("document should render as valid tagged PDF/A-2A + PDF/UA-1");
 
     // It should be a real, non-trivial PDF.
     assert!(pdf.starts_with(b"%PDF-"), "output is not a PDF");
@@ -247,6 +247,11 @@ fn sample() -> Textris {
 
     // --- Document ---------------------------------------------------------
     let mut doc = Textris::new();
+
+    // Title and language feed the PDF metadata and the accessibility (PDF/UA)
+    // requirements; the title is also what a viewer shows in its title bar.
+    doc.title("The Mantis Shrimp: A Field Guide");
+    doc.language("en");
 
     doc.header_right("Stomatopoda - Field Guide");
 

@@ -104,6 +104,22 @@ impl Textris {
         }
     }
 
+    /// Set the document title. It is written to the PDF metadata, shown in the
+    /// viewer's title bar, and required for the accessible (PDF/UA) output. When
+    /// left unset, the renderer falls back to the first heading's text.
+    pub fn title(&mut self, title: impl Into<String>) -> &mut Self {
+        self.doc.title = Some(title.into());
+        self
+    }
+
+    /// Set the document's primary natural language as a BCP 47 / RFC 3066 tag
+    /// (e.g. `"en"`, `"en-GB"`, `"nl"`). It is written to the PDF metadata and
+    /// required for accessible output; it defaults to `"en"` when left unset.
+    pub fn language(&mut self, language: impl Into<String>) -> &mut Self {
+        self.doc.language = Some(language.into());
+        self
+    }
+
     /// The theme this document will be laid out with.
     pub fn theme(&self) -> &Theme {
         &self.doc.theme
@@ -552,12 +568,13 @@ impl Textris {
         &self.doc
     }
 
-    /// Lay out and render the document to PDF/A-2b bytes.
+    /// Lay out and render the document to tagged, accessible PDF/A-2A + PDF/UA-1
+    /// bytes.
     pub fn render(&self, fonts: &Fonts) -> Result<Vec<u8>, RenderError> {
         let mut doc = self.doc.clone();
         doc.resolve_sections();
-        let pages = crate::layout::layout(&doc, fonts);
-        crate::render::render(&pages, &doc, fonts)
+        let laid_out = crate::layout::layout(&doc, fonts);
+        crate::render::render(&laid_out, &doc, fonts)
     }
 
     /// Render the document and write the PDF to `path`.

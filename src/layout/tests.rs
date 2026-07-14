@@ -31,7 +31,7 @@ fn text_stays_within_the_content_box() {
     doc.h3("1. Section");
     doc.paragraph("Some body text here.");
     let pages = layout(&doc.build(), &fonts);
-    for page in &pages {
+    for page in pages.iter() {
         for text in texts(page) {
             assert!(text.x >= theme.page.content_left() - 0.01, "x={}", text.x);
             assert!(text.baseline >= theme.page.content_top());
@@ -391,7 +391,7 @@ fn headings_are_never_orphaned_at_the_bottom_of_a_page() {
     let pages = layout(&doc.build(), &fonts);
     assert!(pages.len() >= 2);
 
-    for page in &pages {
+    for page in pages.iter() {
         let bottom_most = texts(page)
             .into_iter()
             .max_by(|a, b| a.baseline.partial_cmp(&b.baseline).unwrap());
@@ -829,4 +829,244 @@ fn ordered_list_numbers_its_items() {
         .filter(|s| matches!(*s, "a." | "b." | "c."))
         .collect();
     assert_eq!(markers, ["a.", "b.", "c."]);
+}
+
+// --- Tagged-PDF logical structure ---------------------------------------
+
+/// A short tag name for a structure node, for readable assertions.
+fn tag_name(node: &StructNode) -> &'static str {
+    let tag = match node {
+        StructNode::Group { tag, .. } | StructNode::Leaf { tag, .. } => tag,
+    };
+    match tag {
+        StructTag::Heading { .. } => "H",
+        StructTag::Paragraph => "P",
+        StructTag::List(_) => "L",
+        StructTag::ListItem => "LI",
+        StructTag::Label => "Lbl",
+        StructTag::Body => "LBody",
+        StructTag::Div => "Div",
+        StructTag::Table => "Table",
+        StructTag::TableRow => "TR",
+        StructTag::TableHeaderCell(_) => "TH",
+        StructTag::TableCell => "TD",
+    }
+}
+
+fn kids(node: &StructNode) -> &[StructNode] {
+    match node {
+        StructNode::Group { children, .. } => children,
+        StructNode::Leaf { .. } => &[],
+    }
+}
+
+fn names(nodes: &[StructNode]) -> Vec<&'static str> {
+    nodes.iter().map(tag_name).collect()
+}
+
+#[test]
+fn structure_tree_tags_headings_and_paragraphs() {
+    let fonts = test_fonts();
+    let mut doc = Textris::new();
+    doc.h1("Title");
+    doc.paragraph("Body text.");
+    let laid_out = layout(&doc.build(), &fonts);
+
+    assert_eq!(names(&laid_out.structure), ["H", "P"]);
+    // The heading keeps its level and its text as the required tag title.
+    let StructNode::Leaf {
+        tag: StructTag::Heading { level, title },
+        ..
+    } = &laid_out.structure[0]
+    else {
+        panic!("first node should be a heading leaf");
+    };
+    assert_eq!(*level, 1);
+    assert_eq!(title, "Title");
+}
+
+#[test]
+fn bullet_list_is_tagged_as_list_items_with_label_and_body() {
+    use krilla::tagging::ListNumbering;
+    let fonts = test_fonts();
+    let mut doc = Textris::new();
+    doc.bullet_list(["one", "two"]);
+    let laid_out = layout(&doc.build(), &fonts);
+
+    assert_eq!(laid_out.structure.len(), 1, "one list");
+    let list = &laid_out.structure[0];
+    assert!(matches!(
+        list,
+        StructNode::Group {
+            tag: StructTag::List(ListNumbering::Disc),
+            ..
+        }
+    ));
+    let items = kids(list);
+    assert_eq!(names(items), ["LI", "LI"]);
+    for item in items {
+        // Each item is a label (its bullet) followed by a body (its text).
+        assert_eq!(names(kids(item)), ["Lbl", "LBody"]);
+    }
+}
+
+#[test]
+fn ordered_list_records_its_numbering_style() {
+    use crate::model::ListMarker;
+    use krilla::tagging::ListNumbering;
+    let fonts = test_fonts();
+    let mut doc = Textris::new();
+    doc.ordered_list_with(ListMarker::LowerAlpha, ["a", "b"]);
+    let laid_out = layout(&doc.build(), &fonts);
+    assert!(matches!(
+        &laid_out.structure[0],
+        StructNode::Group {
+            tag: StructTag::List(ListNumbering::LowerAlpha),
+            ..
+        }
+    ));
+}
+
+#[test]
+fn data_table_tags_header_and_body_cells() {
+    use krilla::tagging::TableHeaderScope;
+    let fonts = test_fonts();
+    let mut doc = Textris::new();
+    doc.table(["a", "b"], [["1", "2"], ["3", "4"]]);
+    let laid_out = layout(&doc.build(), &fonts);
+
+    let table = &laid_out.structure[0];
+    assert!(matches!(
+        table,
+        StructNode::Group {
+            tag: StructTag::Table,
+            ..
+        }
+    ));
+    let rows = kids(table);
+    assert_eq!(names(rows), ["TR", "TR", "TR"], "header + two body rows");
+
+    // The header row's cells are column-scoped header cells.
+    let header = kids(&rows[0]);
+    assert_eq!(header.len(), 2);
+    assert!(header.iter().all(|c| matches!(
+        c,
+        StructNode::Leaf {
+            tag: StructTag::TableHeaderCell(TableHeaderScope::Column),
+            ..
+        }
+    )));
+    // Body rows hold data cells.
+    assert_eq!(names(kids(&rows[1])), ["TD", "TD"]);
+}
+
+#[test]
+fn a_repeated_table_header_is_tagged_only_once() {
+    let fonts = test_fonts();
+    let mut doc = Textris::new();
+    // Enough rows to break across pages, so the header repeats.
+    doc.table(
+        ["n", "value"],
+        (0..120).map(|i| [i.to_string(), format!("row {i}")]),
+    );
+    let laid_out = layout(&doc.build(), &fonts);
+    assert!(laid_out.pages.len() >= 2, "table should span pages");
+
+    // Exactly one header row of header cells exists in the structure tree,
+    // even though the header is drawn again atop each continuation page.
+    let mut header_cells = 0;
+    fn count_headers(node: &StructNode, n: &mut usize) {
+        if let StructNode::Leaf {
+            tag: StructTag::TableHeaderCell(_),
+            ..
+        } = node
+        {
+            *n += 1;
+        }
+        for child in kids(node) {
+            count_headers(child, n);
+        }
+    }
+    for node in &laid_out.structure {
+        count_headers(node, &mut header_cells);
+    }
+    assert_eq!(header_cells, 2, "two header cells, tagged once");
+
+    // The redrawn headers on later pages are emitted as artifacts, not content.
+    let artifact_runs = laid_out
+        .pages
+        .iter()
+        .skip(1)
+        .flat_map(|p| &p.elements)
+        .filter(|e| matches!(e, Element::Text(t) if t.tag == Tagging::Artifact))
+        .count();
+    assert!(
+        artifact_runs > 0,
+        "repeated header text should be tagged as artifacts on later pages"
+    );
+}
+
+#[test]
+fn a_boxed_callout_groups_its_content() {
+    let fonts = test_fonts();
+    let mut doc = Textris::new();
+    doc.boxed(|b| {
+        b.paragraph("Inside the box.");
+    });
+    let laid_out = layout(&doc.build(), &fonts);
+    // The box is a generic grouping element wrapping its child blocks.
+    assert_eq!(names(&laid_out.structure), ["Div"]);
+    assert_eq!(names(kids(&laid_out.structure[0])), ["P"]);
+}
+
+#[test]
+fn the_outline_lists_headings_in_order_with_their_levels() {
+    let fonts = test_fonts();
+    let mut doc = Textris::new();
+    doc.h1("Top");
+    doc.h3("Sub");
+    doc.paragraph("body");
+    doc.h1("Next");
+    let laid_out = layout(&doc.build(), &fonts);
+
+    let entries: Vec<(u8, &str)> = laid_out
+        .outline
+        .iter()
+        .map(|e| (e.level, e.title.as_str()))
+        .collect();
+    assert_eq!(entries, [(1, "Top"), (3, "Sub"), (1, "Next")]);
+    // Every bookmark points at a real page.
+    assert!(
+        laid_out
+            .outline
+            .iter()
+            .all(|e| e.page_index < laid_out.pages.len())
+    );
+}
+
+#[test]
+fn every_text_run_belongs_to_a_structure_node() {
+    let fonts = test_fonts();
+    let mut doc = Textris::new();
+    doc.h2("Sub");
+    doc.h1("Title");
+    doc.paragraph("A paragraph.");
+    doc.bullet_list(["first", "second"]);
+    doc.table(["h"], [["cell"]]);
+    doc.task_list([(true, "done"), (false, "todo")]);
+    let laid_out = layout(&doc.build(), &fonts);
+
+    // On a single page (no repeated headers), every drawn text run is content
+    // linked to an allocated structure node.
+    assert_eq!(laid_out.pages.len(), 1);
+    for element in &laid_out.pages[0].elements {
+        if let Element::Text(text) = element {
+            match text.tag {
+                Tagging::Content(id) => {
+                    assert!(id < laid_out.nodes, "node id {id} out of range")
+                }
+                Tagging::Artifact => panic!("unexpected artifact text {:?}", text.text),
+            }
+        }
+    }
 }

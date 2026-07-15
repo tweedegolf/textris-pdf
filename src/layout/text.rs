@@ -11,6 +11,20 @@ use crate::{
     model::Inline,
 };
 
+/// What a [`Word`] stands for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum WordKind {
+    /// A shaped run of glyphs.
+    Text,
+    /// A zero-width marker for a hard line break (`'\n'`): [`Engine::wrap`]
+    /// ends the current line here and the marker itself is never drawn.
+    HardBreak,
+    /// A glyph-less inline fill-in line of `width` points, participating in
+    /// line breaking as an atomic word but drawn as a baseline stroke by
+    /// [`Engine::draw_line`].
+    FillIn,
+}
+
 /// A shaped word plus its measured width, the atomic unit of line breaking.
 #[derive(Debug, Clone)]
 pub(super) struct Word {
@@ -19,21 +33,19 @@ pub(super) struct Word {
     pub(super) text: String,
     pub(super) glyphs: Arc<[KrillaGlyph]>,
     pub(super) width: f32,
-    /// A zero-width marker for a hard line break (`'\n'`): [`Engine::wrap`]
-    /// ends the current line here and the marker itself is never drawn.
-    pub(super) hard_break: bool,
+    pub(super) kind: WordKind,
 }
 
 impl Word {
-    /// The zero-width hard-break marker.
-    fn hard_break() -> Self {
+    /// A glyph-less marker word (a hard break or a fill-in line).
+    fn marker(kind: WordKind, color: Option<rgb::Color>, width: f32) -> Self {
         Self {
             style: Style::Regular,
-            color: None,
+            color,
             text: String::new(),
             glyphs: Vec::new().into(),
-            width: 0.0,
-            hard_break: true,
+            width,
+            kind,
         }
     }
 }
@@ -118,8 +130,23 @@ impl Engine<'_> {
             if index > 0 {
                 x += self.fonts.space_width(style, size);
             }
+            // A fill-in line draws a baseline stroke rather than glyphs, and is
+            // never merged into a neighbouring text run.
+            if line[index].kind == WordKind::FillIn {
+                let width = line[index].width;
+                self.push(Element::Stroke {
+                    points: vec![(x, baseline), (x + width, baseline)],
+                    width: 0.7,
+                    color: run_color,
+                    closed: false,
+                });
+                x += width;
+                index += 1;
+                continue;
+            }
             let mut run_end = index + 1;
             while run_end < line.len()
+                && line[run_end].kind == WordKind::Text
                 && line[run_end].style == style
                 && line[run_end].color.unwrap_or(color) == run_color
             {
@@ -182,9 +209,14 @@ impl Engine<'_> {
         for inline in inlines {
             let style = inline.resolve_style(base_bold, base_italic);
             let color = inline.color.map(|c| c.resolve(&self.theme.palette));
+            // A fill-in run is an atomic blank, not text to be tokenized.
+            if let Some(length) = inline.fill_in {
+                words.push(Word::marker(WordKind::FillIn, color, length));
+                continue;
+            }
             for (index, segment) in inline.text.split('\n').enumerate() {
                 if index > 0 {
-                    words.push(Word::hard_break());
+                    words.push(Word::marker(WordKind::HardBreak, None, 0.0));
                 }
                 for token in segment.split(' ') {
                     if token.is_empty() {
@@ -206,7 +238,8 @@ impl Engine<'_> {
         // word so no space is inserted mid-word.
         let mut pieces: Vec<(Word, bool)> = Vec::new();
         for word in words {
-            if word.width > max_width {
+            // Only text can be split; a fill-in line is atomic.
+            if word.width > max_width && word.kind == WordKind::Text {
                 for (i, frag) in self
                     .break_word(&word, max_width, size)
                     .into_iter()
@@ -224,7 +257,7 @@ impl Engine<'_> {
         let mut width = 0.0;
 
         for (word, space_before) in pieces {
-            if word.hard_break {
+            if word.kind == WordKind::HardBreak {
                 lines.push(std::mem::take(&mut line));
                 width = 0.0;
                 continue;
@@ -282,7 +315,7 @@ impl Engine<'_> {
             text: text.to_string(),
             width: shaped.width(size),
             glyphs: shaped.glyphs,
-            hard_break: false,
+            kind: WordKind::Text,
         }
     }
 }

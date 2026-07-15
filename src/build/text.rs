@@ -46,6 +46,7 @@ impl Text {
             mono,
             color,
             section_ref: None,
+            fill_in: None,
         });
         self
     }
@@ -85,6 +86,19 @@ impl Text {
     /// the document is laid out, so it follows a custom theme automatically.
     pub fn muted(self, text: impl Into<String>) -> Self {
         self.push_run(text, false, false, false, Some(InlineColor::Muted))
+    }
+
+    /// Append an inline fill-in line: a horizontal rule `length` points long,
+    /// drawn along the text baseline, so it flows with the surrounding words as
+    /// a blank to be written on. For example, `text("My name is ")` followed by
+    /// `.fill_in(120.0)` renders `My name is ____________`. See also
+    /// [`fill_in`] for the table-cell form.
+    pub fn fill_in(mut self, length: f32) -> Self {
+        self.runs.push(Inline {
+            fill_in: Some(length),
+            ..Inline::new("")
+        });
+        self
     }
 
     /// Append a hard line break: the following text starts on a new line
@@ -235,7 +249,9 @@ pub fn spacer(height: f32) -> Cell {
 fn normalize(inlines: Vec<Inline>) -> Vec<Inline> {
     let mut out: Vec<Inline> = Vec::with_capacity(inlines.len());
     for run in inlines {
-        if run.text.is_empty() {
+        // A fill-in run carries no text but must survive; every other empty
+        // run is noise.
+        if run.text.is_empty() && run.fill_in.is_none() {
             continue;
         }
         match out.last_mut() {
@@ -247,7 +263,10 @@ fn normalize(inlines: Vec<Inline>) -> Vec<Inline> {
                     // Section references are placeholders whose text is
                     // replaced at resolution; never merge them.
                     && last.section_ref.is_none()
-                    && run.section_ref.is_none() =>
+                    && run.section_ref.is_none()
+                    // Fill-in lines are atomic markers, not text; never merge.
+                    && last.fill_in.is_none()
+                    && run.fill_in.is_none() =>
             {
                 last.text.push_str(&run.text);
             }

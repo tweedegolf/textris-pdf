@@ -172,8 +172,9 @@ fn column_widths_follow_content_not_an_equal_split() {
     );
 
     // And "common name" must be wide enough to hold its long word without breaking.
+    let (min_content_width, _) = engine.column_metrics(t, 1);
     assert!(
-        widths[1] >= engine.min_column_width(t, 1) + 2.0 * theme.table.inset_x,
+        widths[1] >= min_content_width + 2.0 * theme.table.inset_x,
         "common name should fit its widest word on one line"
     );
 }
@@ -714,6 +715,178 @@ fn fill_in_cells_draw_a_line_and_blank_cells_draw_nothing() {
         .filter(|e| matches!(e, Element::Stroke { .. }))
         .count();
     assert_eq!(strokes, 1, "one fill-in line expected");
+}
+
+#[test]
+fn inline_fill_in_draws_a_baseline_stroke_between_the_words() {
+    use crate::build::text;
+    let fonts = test_fonts();
+    let len = 80.0;
+    let mut doc = Textris::new();
+    doc.paragraph(
+        text("My name is ")
+            .fill_in(len)
+            .normal(" and I am ")
+            .fill_in(40.0)
+            .normal(" years old."),
+    );
+    let pages = layout(&doc.build(), &fonts);
+
+    // Two fill-in lines flow inline with the text.
+    let strokes: Vec<_> = pages[0]
+        .elements
+        .iter()
+        .filter_map(|e| match e {
+            Element::Stroke { points, .. } => Some(points.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(strokes.len(), 2, "one stroke per fill-in");
+
+    // The first blank is horizontal, exactly `len` points wide, and sits on the
+    // same baseline as its surrounding text.
+    let [(x0, y0), (x1, y1)] = strokes[0][..] else {
+        panic!("a fill-in is a two-point line");
+    };
+    assert!((y0 - y1).abs() < 0.001, "the line is horizontal");
+    assert!((x1 - x0 - len).abs() < 0.01, "the line is `len` wide");
+    let baseline = texts(&pages[0]).first().expect("leading text run").baseline;
+    assert!(
+        (y0 - baseline).abs() < 0.001,
+        "the line sits on the baseline"
+    );
+    // The blank follows the leading "My name is " text, so it starts to its right.
+    assert!(
+        x0 > pages[0]
+            .elements
+            .iter()
+            .find_map(|e| match e {
+                Element::Text(t) => Some(t.x),
+                _ => None,
+            })
+            .unwrap()
+    );
+}
+
+#[test]
+fn a_table_header_is_never_stranded_at_the_bottom_of_a_page() {
+    let fonts = test_fonts();
+    // Fill the page so only a sliver remains, then start a table: the header
+    // must move to the next page together with the first body row, not be
+    // drawn alone at (or beyond) the bottom margin.
+    let mut doc = Textris::new();
+    doc.paragraph("intro");
+    doc.spacer(680.0);
+    doc.table(["name", "value"], [["a", "b"]]);
+    let pages = layout(&doc.build(), &fonts);
+
+    assert_eq!(pages.len(), 2, "the table should break to a fresh page");
+    let page_texts =
+        |i: usize| -> Vec<String> { texts(&pages[i]).iter().map(|t| t.text.clone()).collect() };
+    assert!(
+        !page_texts(0).iter().any(|t| t == "name" || t == "a"),
+        "no table content on the crowded page: {:?}",
+        page_texts(0)
+    );
+    assert!(
+        page_texts(1).iter().any(|t| t == "name") && page_texts(1).iter().any(|t| t == "a"),
+        "header and first row share the fresh page: {:?}",
+        page_texts(1)
+    );
+}
+
+#[test]
+fn a_cell_taller_than_a_page_splits_across_pages() {
+    let fonts = test_fonts();
+    let theme = Theme::default();
+    // A single-column table whose one body cell wraps to far more lines than
+    // one page can hold.
+    let mut doc = Textris::new();
+    doc.table(["v"], [["word ".repeat(2000)]]);
+    let laid_out = layout(&doc.build(), &fonts);
+    let pages = &laid_out.pages;
+    assert!(pages.len() >= 2, "the cell should continue on a next page");
+
+    for (index, page) in pages.iter().enumerate() {
+        // Every fragment keeps its text inside the content box.
+        for t in texts(page) {
+            assert!(
+                t.baseline <= theme.page.content_bottom() + 0.01,
+                "page {index}: baseline {} beyond the bottom margin",
+                t.baseline
+            );
+            assert!(t.baseline >= theme.page.content_top() - 0.01);
+        }
+        // The stripe fill is drawn per fragment and stays on its page.
+        for e in &page.elements {
+            if let Element::Rect { y, h, .. } = e {
+                assert!(y + h <= theme.page.content_bottom() + 0.01);
+            }
+        }
+        // The cell's content flows onto every page, under a repeated header.
+        assert!(
+            texts(page).iter().any(|t| t.text.contains("word")),
+            "page {index} should carry a fragment of the cell"
+        );
+        assert!(
+            texts(page).iter().any(|t| t.text == "v"),
+            "page {index} should carry the (repeated) header"
+        );
+    }
+
+    // Continuation pages redraw the header as an artifact; the real header is
+    // tagged once, and the split row stays a single structure row.
+    assert!(
+        texts(&pages[1])
+            .iter()
+            .any(|t| t.text == "v" && t.tag == Tagging::Artifact),
+        "the repeated header is an artifact"
+    );
+    let table = &laid_out.structure[0];
+    assert_eq!(
+        names(kids(table)),
+        ["TR", "TR"],
+        "one header row and one body row, however many fragments were drawn"
+    );
+}
+
+#[test]
+fn a_spacer_cell_taller_than_a_page_flows_over_multiple_pages() {
+    let fonts = test_fonts();
+    // A label-table field asking for far more writing room than one page.
+    let mut doc = Textris::new();
+    doc.label_table_with(|t| {
+        t.spacer("Notes", 2000.0);
+    });
+    let pages = layout(&doc.build(), &fonts);
+
+    // ~700pt of content fits per page, so 2000pt spans three pages.
+    assert_eq!(pages.len(), 3, "the spacer height should consume pages");
+    // The label sits on the first fragment.
+    assert!(texts(&pages[0]).iter().any(|t| t.text == "Notes"));
+}
+
+#[test]
+fn an_overlong_word_in_a_paragraph_wraps_within_the_content_width() {
+    let fonts = test_fonts();
+    let theme = Theme::default();
+    let mut doc = Textris::new();
+    // A single unbreakable "word" wider than several lines.
+    doc.paragraph("W".repeat(300));
+    let pages = layout(&doc.build(), &fonts);
+
+    let runs = texts(&pages[0]);
+    assert!(
+        runs.len() > 1,
+        "the word should break into character fragments across lines"
+    );
+    for t in &runs {
+        let right = t.x + fonts.measure(t.style, &t.text, t.size);
+        assert!(
+            right <= theme.page.content_right() + 0.01,
+            "a fragment overflows the right margin: {right}"
+        );
+    }
 }
 
 #[test]

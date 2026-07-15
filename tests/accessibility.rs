@@ -82,6 +82,21 @@ fn the_title_falls_back_to_the_first_heading() {
 }
 
 #[test]
+fn a_table_cell_spanning_multiple_pages_still_renders_accessibly() {
+    let fonts = load_fonts();
+    let mut doc = Textris::new();
+    doc.title("Split row");
+    // One table cell that is far taller than a page, so its structure element
+    // collects marked content from several pages.
+    doc.table(["notes"], [["lorem ipsum ".repeat(1200)]]);
+
+    let pdf = doc
+        .render(&fonts)
+        .expect("a split table row should still validate as PDF/A-2A + PDF/UA-1");
+    assert!(contains(&pdf, "StructTreeRoot"));
+}
+
+#[test]
 fn a_document_without_headings_still_renders_accessibly() {
     let fonts = load_fonts();
     let mut doc = Textris::new();

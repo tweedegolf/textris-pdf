@@ -317,6 +317,10 @@ pub struct Inline {
     /// labeled with this name: [`Document::resolve_sections`] replaces `text`
     /// with the section number. An unknown label leaves the placeholder text.
     pub section_ref: Option<String>,
+    /// When set, this run draws no text but an inline horizontal fill-in line
+    /// of this many points, along the text baseline (a blank to be written on).
+    /// Its `text` is empty and its emphasis flags are ignored.
+    pub fill_in: Option<f32>,
 }
 
 impl Inline {
@@ -328,6 +332,7 @@ impl Inline {
             mono: false,
             color: None,
             section_ref: None,
+            fill_in: None,
         }
     }
 
@@ -407,6 +412,13 @@ impl Table {
             .len()
             .max(self.rows.iter().map(Vec::len).max().unwrap_or(0))
     }
+
+    /// Whether the table shows a header row: its style asks for one and the
+    /// header cells are not all blank. Shared by every output format (PDF,
+    /// Markdown, docx) so they agree on when a header appears.
+    pub fn has_header(&self) -> bool {
+        self.style.header && !self.headers.iter().all(Cell::is_blank)
+    }
 }
 
 /// Content for one section (left, center, or right) of the page header or footer.
@@ -485,6 +497,7 @@ mod tests {
             mono,
             color: None,
             section_ref: None,
+            fill_in: None,
         }
     }
 
@@ -509,15 +522,6 @@ mod tests {
             inline("x", true, true, true).resolve_style(true, true),
             Style::Mono
         );
-    }
-
-    #[test]
-    fn plain_text_concatenates_runs() {
-        let runs = vec![
-            inline("Hello ", false, false, false),
-            inline("world", true, false, false),
-        ];
-        assert_eq!(plain_text(&runs), "Hello world");
     }
 
     #[test]
@@ -625,6 +629,44 @@ mod tests {
         assert_eq!(last[0].text, "1", "backward reference");
         assert_eq!(last[1].text, "??", "unknown labels keep the placeholder");
         assert!(last[1].section_ref.is_some());
+    }
+
+    #[test]
+    fn resolve_sections_reaches_header_and_footer_chrome() {
+        let mut doc = Document {
+            blocks: vec![heading(3, "Intro", true, Some("intro"))],
+            ..Document::default()
+        };
+        doc.footer.right = Some(SectionContent::Spans(vec![Inline {
+            section_ref: Some("intro".into()),
+            ..Inline::new("??")
+        }]));
+        doc.resolve_sections();
+
+        let Some(SectionContent::Spans(spans)) = &doc.footer.right else {
+            panic!("footer spans expected");
+        };
+        assert_eq!(spans[0].text, "1", "chrome references resolve too");
+        assert!(spans[0].section_ref.is_none());
+    }
+
+    #[test]
+    fn resolve_sections_is_idempotent() {
+        let mut doc = Document {
+            blocks: vec![
+                heading(3, "Intro", true, Some("intro")),
+                Block::Paragraph(vec![Inline {
+                    section_ref: Some("intro".into()),
+                    ..Inline::new("??")
+                }]),
+            ],
+            ..Document::default()
+        };
+        doc.resolve_sections();
+        let once = format!("{:?}", doc.blocks);
+        // A second pass must not re-number ("1. 1. Intro") or re-substitute.
+        doc.resolve_sections();
+        assert_eq!(format!("{:?}", doc.blocks), once);
     }
 
     #[test]

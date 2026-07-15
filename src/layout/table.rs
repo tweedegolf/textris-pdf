@@ -1,11 +1,16 @@
 //! Table layout: column sizing (auto, label and custom models), row heights,
-//! page-breaking with repeated headers, and row emission.
+//! page-breaking with repeated headers, and row emission. A row that fits a
+//! page but not the space left breaks to the next page as a whole; a row (or
+//! cell) taller than a page splits and continues across pages.
 
 use krilla::{color::rgb, tagging::TableHeaderScope};
 
 use crate::{
     fonts::Style,
-    layout::{Element, Engine, StructTag, Tagging},
+    layout::{
+        Element, Engine, StructTag, Tagging,
+        text::{Word, WordKind},
+    },
     model::{Cell, Table},
     theme::{Align, ColumnWidth, ColumnWidths, TableStyle},
 };
@@ -27,6 +32,15 @@ impl RowStyle<'_> {
     fn align(&self, column: usize) -> Align {
         self.align.get(column).copied().unwrap_or_default()
     }
+}
+
+/// Everything needed to redraw a table's header row (as an artifact) at the top
+/// of a continuation page.
+struct HeaderRepeat<'a> {
+    cells: &'a [Cell],
+    style: &'a RowStyle<'a>,
+    height: f32,
+    tags: &'a [Tagging],
 }
 
 impl Engine<'_> {
@@ -58,24 +72,16 @@ impl Engine<'_> {
         }
     }
 
-    /// Shared table geometry: column widths, column count and whether a header
-    /// row should be drawn. Used by both layout and measurement.
-    fn table_setup(&self, table: &Table, width: f32) -> (Vec<f32>, usize, bool) {
-        let columns = table.columns();
-        let widths = self.column_widths(table, columns, width);
-        let has_header = table.style.header && !table.headers.iter().all(Cell::is_blank);
-        (widths, columns, has_header)
-    }
-
     /// The height the whole table would occupy at the given content width.
     pub(super) fn table_height(&self, table: &Table, width: f32) -> f32 {
-        if table.columns() == 0 {
+        let columns = table.columns();
+        if columns == 0 {
             return 0.0;
         }
-        let (widths, columns, has_header) = self.table_setup(table, width);
+        let widths = self.column_widths(table, columns, width);
         let style = &table.style;
         let mut height = 0.0;
-        if has_header {
+        if table.has_header() {
             let header_style = self.header_row_style(style);
             height += self.row_height(&table.headers, &widths, columns, &header_style);
         }
@@ -87,18 +93,37 @@ impl Engine<'_> {
     }
 
     pub(super) fn layout_table(&mut self, table: &Table) {
-        if table.columns() == 0 {
+        let columns = table.columns();
+        if columns == 0 {
             return;
         }
-        let (widths, columns, has_header) = self.table_setup(table, self.width());
+        let widths = self.column_widths(table, columns, self.width());
         let xs = self.column_offsets(&widths);
         let style = &table.style;
 
         let header_style = self.header_row_style(style);
 
         // Reused every time the header row repeats after a page break.
-        let header_height =
-            has_header.then(|| self.row_height(&table.headers, &widths, columns, &header_style));
+        let header_height = table
+            .has_header()
+            .then(|| self.row_height(&table.headers, &widths, columns, &header_style));
+        let repeat_header_tags = vec![Tagging::Artifact; columns];
+        let repeat_header = header_height.map(|height| HeaderRepeat {
+            cells: &table.headers,
+            style: &header_style,
+            height,
+            tags: &repeat_header_tags,
+        });
+
+        // A row taller than this cannot fit any page (a fresh page still
+        // carries the repeated header) and is split across pages instead of
+        // broken to the next one.
+        let page_capacity = self.theme.page.content_bottom()
+            - self.theme.page.content_top()
+            - header_height.unwrap_or(0.0);
+        // The smallest useful fragment of a split row: one line plus insets.
+        let min_fragment = self.table_font_size(style) * self.theme.spacing.line_height
+            + 2.0 * self.theme.table.inset_y;
 
         self.structure.open(StructTag::Table);
 
@@ -106,6 +131,19 @@ impl Engine<'_> {
         // cells scoped to their column. When it repeats after a page break it
         // is redrawn as an artifact so assistive tech reads it only once.
         if let Some(header_height) = header_height {
+            // Orphan control: keep the header together with the first body row
+            // — or, when that row will split anyway, with its first fragment —
+            // so a table starting at the bottom of a page breaks *before* its
+            // header instead of stranding it (or overflowing the margin).
+            let first_row_height = table.rows.first().map_or(0.0, |row| {
+                self.row_height(row, &widths, columns, &self.body_row_style(style, None))
+            });
+            let first_keep = if first_row_height > page_capacity {
+                min_fragment
+            } else {
+                first_row_height
+            };
+            self.ensure(header_height + first_keep);
             let tags = self.push_row_structure(Some(TableHeaderScope::Column), columns);
             self.emit_row(
                 &table.headers,
@@ -117,7 +155,6 @@ impl Engine<'_> {
                 &tags,
             );
         }
-        let repeat_header_tags = vec![Tagging::Artifact; columns];
 
         for (index, row) in table.rows.iter().enumerate() {
             let fill = if style.striped && index % 2 == 0 {
@@ -127,28 +164,53 @@ impl Engine<'_> {
             };
             let row_style = self.body_row_style(style, fill);
 
+            // A row that fits a page breaks to the next page as a whole; a
+            // taller one splits across pages, so it only needs room for its
+            // first fragment here.
             let height = self.row_height(row, &widths, columns, &row_style);
-            let content_top = self.theme.page.content_top();
-            let content_bottom = self.theme.page.content_bottom();
-            if self.y + height > content_bottom && self.y > content_top {
+            let splits = height > page_capacity;
+            if self.needs_break(if splits { min_fragment } else { height }) {
                 self.new_page();
-                if let Some(header_height) = header_height {
-                    self.emit_row(
-                        &table.headers,
-                        &xs,
-                        &widths,
-                        columns,
-                        &header_style,
-                        header_height,
-                        &repeat_header_tags,
-                    );
+                if let Some(header) = &repeat_header {
+                    self.emit_repeated_header(header, &xs, &widths, columns);
                 }
             }
             let tags = self.push_row_structure(None, columns);
-            self.emit_row(row, &xs, &widths, columns, &row_style, height, &tags);
+            if splits {
+                self.emit_split_row(
+                    row,
+                    &xs,
+                    &widths,
+                    columns,
+                    &row_style,
+                    &tags,
+                    repeat_header.as_ref(),
+                );
+            } else {
+                self.emit_row(row, &xs, &widths, columns, &row_style, height, &tags);
+            }
         }
 
         self.structure.close();
+    }
+
+    /// Redraw the header row (as an artifact) at the top of a continuation page.
+    fn emit_repeated_header(
+        &mut self,
+        header: &HeaderRepeat,
+        xs: &[f32],
+        widths: &[f32],
+        columns: usize,
+    ) {
+        self.emit_row(
+            header.cells,
+            xs,
+            widths,
+            columns,
+            header.style,
+            header.height,
+            header.tags,
+        );
     }
 
     /// Add a table row to the structure tree with one cell per column, and
@@ -286,7 +348,7 @@ impl Engine<'_> {
     /// The `(min, natural)` content widths of a column across header and body:
     /// the widest single unbreakable word, and the widest cell with each of
     /// its (hard-break-separated) lines unwrapped.
-    fn column_metrics(&self, table: &Table, column: usize) -> (f32, f32) {
+    pub(super) fn column_metrics(&self, table: &Table, column: usize) -> (f32, f32) {
         let size = self.table_font_size(&table.style);
         let mut min = 0.0_f32;
         let mut natural = 0.0_f32;
@@ -295,7 +357,7 @@ impl Engine<'_> {
             let mut line_width = 0.0;
             let mut first = true;
             for word in &words {
-                if word.hard_break {
+                if word.kind == WordKind::HardBreak {
                     natural = natural.max(line_width);
                     line_width = 0.0;
                     first = true;
@@ -321,34 +383,34 @@ impl Engine<'_> {
         (min, natural)
     }
 
-    /// The min-content width of a column: the widest single unbreakable word
-    /// across header and body.
-    #[cfg(test)]
-    pub(super) fn min_column_width(&self, table: &Table, column: usize) -> f32 {
-        self.column_metrics(table, column).0
+    /// The minimum content height a row's *non-text* cells ask for: the style's
+    /// floor, any spacer cell's height, and the fill-in minimum (room to write
+    /// above a fill-in line).
+    fn row_min_content(&self, cells: &[Cell], columns: usize, style: &RowStyle) -> f32 {
+        let mut content = style.row_min_height;
+        for c in 0..columns {
+            match cells.get(c) {
+                Some(Cell::Spacer(height)) => content = content.max(*height),
+                Some(Cell::FillIn) => content = content.max(self.theme.table.fill_in_min_height),
+                _ => {}
+            }
+        }
+        content
     }
 
-    /// Height of a row: the tallest wrapped cell, clamped to a minimum (the
-    /// style's, or any spacer cell's height), plus vertical insets.
+    /// Height of a row: the tallest wrapped cell, clamped to the row's minimum
+    /// content height, plus vertical insets.
     fn row_height(&self, cells: &[Cell], widths: &[f32], columns: usize, style: &RowStyle) -> f32 {
         let body = style.size;
         let line_h = body * self.theme.spacing.line_height;
-        let mut content = style.row_min_height;
+        let mut content = self.row_min_content(cells, columns, style);
         #[allow(clippy::needless_range_loop)] // reads parallel per-column arrays
         for c in 0..columns {
             let cell = cells.get(c);
-            match cell {
-                Some(Cell::Spacer(height)) => {
-                    content = content.max(*height);
-                    continue;
-                }
-                // A fill-in field is empty, but gets a standard minimum height
-                // so there is room to write above its line.
-                Some(Cell::FillIn) => {
-                    content = content.max(self.theme.table.fill_in_min_height);
-                    continue;
-                }
-                _ => {}
+            // Spacer and fill-in cells contribute via `row_min_content`; every
+            // other cell wraps to at least one (possibly empty) line.
+            if matches!(cell, Some(Cell::Spacer(_) | Cell::FillIn)) {
+                continue;
             }
             let avail = self.cell_available_width(widths[c], c, style);
             let words = self.tokenize(
@@ -379,41 +441,19 @@ impl Engine<'_> {
         tags: &[Tagging],
     ) {
         let top = self.y;
-
-        if let Some(fill) = style.fill {
-            let start = xs[0];
-            let end = xs[columns - 1] + widths[columns - 1];
-            self.push(Element::Rect {
-                x: start,
-                y: top,
-                w: end - start,
-                h: height,
-                fill,
-            });
-        }
+        self.push_row_fill(xs, widths, columns, top, height, style);
 
         let body = style.size;
         let line_h = body * self.theme.spacing.line_height;
-        let inset_x = self.theme.table.inset_x;
-        let inset_y = self.theme.table.inset_y;
         let text_color = self.theme.palette.text;
         for c in 0..columns {
             // Text drawn below lands in this column's structure cell; the fill
             // and fill-in line drawn as strokes/rects stay artifacts regardless.
             self.current_tag = tags[c];
-            let inset_left = self.cell_inset_left(c, style);
             let cell = match cells.get(c) {
                 Some(Cell::FillIn) => {
                     // A fill-in line along the cell's bottom inset.
-                    let y = top + height - inset_y;
-                    let x0 = xs[c] + inset_left;
-                    let x1 = xs[c] + widths[c] - inset_x;
-                    self.push(Element::Stroke {
-                        points: vec![(x0, y), (x1, y)],
-                        width: 0.7,
-                        color: text_color,
-                        closed: false,
-                    });
+                    self.push_fill_in_line(c, xs, widths, style, top + height);
                     continue;
                 }
                 Some(Cell::Text(inlines)) => inlines.as_slice(),
@@ -434,21 +474,165 @@ impl Engine<'_> {
             let block_h = cap + (lines.len() as f32 - 1.0) * line_h;
             let first_baseline = top + (height - block_h) / 2.0 + cap;
             let mut top_of_text = first_baseline - self.fonts.ascent(Style::Regular, body);
-            let align = style.align(c);
             for line in &lines {
-                let x = match align {
-                    Align::Left => xs[c] + inset_left,
-                    Align::Center => {
-                        xs[c] + inset_left + (avail - self.line_width(line, body)) / 2.0
-                    }
-                    Align::Right => xs[c] + widths[c] - inset_x - self.line_width(line, body),
-                };
+                let x = self.line_x(line, c, xs, widths, style);
                 self.draw_line(line, x, top_of_text, body, text_color);
                 top_of_text += line_h;
             }
         }
 
         self.y = top + height;
+    }
+
+    /// Draw a row (or row fragment) that is too tall for any single page by
+    /// splitting it into page-sized pieces: every cell's wrapped lines continue
+    /// top-aligned across pages (repeating the table header, when there is
+    /// one), each fragment carries the row's fill and insets, and a fill-in
+    /// line lands on the final fragment. Spacer heights beyond the last text
+    /// line keep consuming pages until they are used up.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_split_row(
+        &mut self,
+        cells: &[Cell],
+        xs: &[f32],
+        widths: &[f32],
+        columns: usize,
+        style: &RowStyle,
+        tags: &[Tagging],
+        header: Option<&HeaderRepeat>,
+    ) {
+        let body = style.size;
+        let line_h = body * self.theme.spacing.line_height;
+        let inset_y = self.theme.table.inset_y;
+        let text_color = self.theme.palette.text;
+
+        // Wrap every text cell once, up front; the shared cursor below walks
+        // all columns in lockstep, one page-sized batch of lines at a time.
+        let cell_lines: Vec<Vec<Vec<Word>>> = (0..columns)
+            .map(|c| {
+                let inlines = cells.get(c).map(Cell::inlines).unwrap_or(&[]);
+                if inlines.is_empty() {
+                    return Vec::new();
+                }
+                let avail = self.cell_available_width(widths[c], c, style);
+                self.wrap(
+                    self.tokenize(inlines, false, style.italic, body),
+                    avail,
+                    body,
+                )
+            })
+            .collect();
+        let total_lines = cell_lines.iter().map(Vec::len).max().unwrap_or(0);
+        let min_content = self.row_min_content(cells, columns, style);
+
+        let mut cursor = 0; // lines drawn so far
+        let mut consumed = 0.0; // content height drawn so far
+        loop {
+            // The content this fragment can hold. At least one line, so a
+            // caller starting the row too low overflows a little instead of
+            // never making progress.
+            let avail = (self.theme.page.content_bottom() - self.y - 2.0 * inset_y).max(line_h);
+            let take = ((avail / line_h) as usize).min(total_lines - cursor);
+            // Beyond its lines, a fragment grows toward any outstanding
+            // minimum content (a spacer cell, the style's row minimum),
+            // clamped to the page.
+            let content_h = (take as f32 * line_h).max((min_content - consumed).clamp(0.0, avail));
+            let last = cursor + take == total_lines && consumed + content_h >= min_content - 0.01;
+
+            let top = self.y;
+            let height = content_h + 2.0 * inset_y;
+            self.push_row_fill(xs, widths, columns, top, height, style);
+
+            for c in 0..columns {
+                self.current_tag = tags[c];
+                if matches!(cells.get(c), Some(Cell::FillIn)) {
+                    // The fill-in line lands on the final fragment's bottom.
+                    if last {
+                        self.push_fill_in_line(c, xs, widths, style, top + height);
+                    }
+                    continue;
+                }
+                let lines = &cell_lines[c];
+                let end = (cursor + take).min(lines.len());
+                let mut top_of_text = top + inset_y;
+                for line in &lines[cursor.min(end)..end] {
+                    let x = self.line_x(line, c, xs, widths, style);
+                    self.draw_line(line, x, top_of_text, body, text_color);
+                    top_of_text += line_h;
+                }
+            }
+
+            self.y = top + height;
+            cursor += take;
+            consumed += content_h;
+            if last {
+                break;
+            }
+            self.new_page();
+            if let Some(header) = header {
+                self.emit_repeated_header(header, xs, widths, columns);
+            }
+        }
+    }
+
+    /// Push the row's background fill (zebra striping), when it has one.
+    fn push_row_fill(
+        &mut self,
+        xs: &[f32],
+        widths: &[f32],
+        columns: usize,
+        top: f32,
+        height: f32,
+        style: &RowStyle,
+    ) {
+        if let Some(fill) = style.fill {
+            let start = xs[0];
+            let end = xs[columns - 1] + widths[columns - 1];
+            self.push(Element::Rect {
+                x: start,
+                y: top,
+                w: end - start,
+                h: height,
+                fill,
+            });
+        }
+    }
+
+    /// Push a fill-in cell's line, spanning column `c` along its bottom inset;
+    /// `bottom` is the y of the row's bottom edge.
+    fn push_fill_in_line(
+        &mut self,
+        c: usize,
+        xs: &[f32],
+        widths: &[f32],
+        style: &RowStyle,
+        bottom: f32,
+    ) {
+        let y = bottom - self.theme.table.inset_y;
+        let x0 = xs[c] + self.cell_inset_left(c, style);
+        let x1 = xs[c] + widths[c] - self.theme.table.inset_x;
+        self.push(Element::Stroke {
+            points: vec![(x0, y), (x1, y)],
+            width: 0.7,
+            color: self.theme.palette.text,
+            closed: false,
+        });
+    }
+
+    /// The x where one line of column `c` starts, honoring the column's
+    /// alignment.
+    fn line_x(&self, line: &[Word], c: usize, xs: &[f32], widths: &[f32], style: &RowStyle) -> f32 {
+        let inset_left = self.cell_inset_left(c, style);
+        match style.align(c) {
+            Align::Left => xs[c] + inset_left,
+            Align::Center => {
+                let avail = self.cell_available_width(widths[c], c, style);
+                xs[c] + inset_left + (avail - self.line_width(line, style.size)) / 2.0
+            }
+            Align::Right => {
+                xs[c] + widths[c] - self.theme.table.inset_x - self.line_width(line, style.size)
+            }
+        }
     }
 
     fn cell_inset_left(&self, column: usize, style: &RowStyle) -> f32 {

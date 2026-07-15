@@ -21,6 +21,8 @@
 //!   the delimiter row. A [`Cell::FillIn`] becomes an underscore run; blank and
 //!   spacer cells are empty. A table with no header row (a label table) still
 //!   gets an empty header, which GitHub-flavored Markdown requires.
+//! - **Inline fill-ins** ([`Inline::fill_in`]) become a fixed underscore run;
+//!   their length in points has no Markdown equivalent.
 //! - **Ordered lists** always number with `1.`, `2.`, … Markdown has no lettered
 //!   list, so a [`ListMarker::LowerAlpha`](crate::model::ListMarker) list is
 //!   numbered too.
@@ -171,7 +173,7 @@ fn render_table(table: &Table) -> String {
     let columns = table.columns().max(1);
     let style = &table.style;
 
-    let header = if header_shown(table) {
+    let header = if table.has_header() {
         (0..columns)
             .map(|c| cell_text(table.headers.get(c)))
             .collect()
@@ -201,12 +203,6 @@ fn render_table(table: &Table) -> String {
     lines.join("\n")
 }
 
-/// Whether the table's header row is drawn: a header style with cells that are
-/// not all blank, matching the PDF and docx exports.
-fn header_shown(table: &Table) -> bool {
-    table.style.header && !table.headers.is_empty() && !table.headers.iter().all(Cell::is_blank)
-}
-
 /// Wrap a row's cells in the `| a | b |` pipe syntax.
 fn row_line(cells: &[String]) -> String {
     format!("| {} |", cells.join(" | "))
@@ -234,9 +230,13 @@ fn render_inlines(inlines: &[Inline]) -> String {
     inlines.iter().map(render_inline).collect()
 }
 
-/// Render one inline run: an inline code span for `mono`, otherwise the escaped
-/// text wrapped in the run's emphasis markers.
+/// Render one inline run: an underscore blank for a fill-in, an inline code
+/// span for `mono`, otherwise the escaped text wrapped in the run's emphasis
+/// markers.
 fn render_inline(inline: &Inline) -> String {
+    if inline.fill_in.is_some() {
+        return "________".to_string();
+    }
     if inline.mono {
         return code_span(&inline.text);
     }
@@ -394,6 +394,14 @@ mod tests {
         // Header row present but empty, then the fill-in underscores.
         assert!(md.contains("|  |  |\n| --- | --- |"), "{md}");
         assert!(md.contains("| Date | ________ |"), "{md}");
+    }
+
+    #[test]
+    fn an_inline_fill_in_becomes_an_underscore_run() {
+        let mut doc = Textris::new();
+        doc.paragraph(text("My name is ").fill_in(120.0).normal("."));
+        let md = doc.to_markdown();
+        assert!(md.contains("My name is ________."), "{md}");
     }
 
     #[test]

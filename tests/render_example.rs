@@ -498,6 +498,18 @@ fn sample() -> Textris {
         t.fill_in("Signature");
     });
 
+    doc.spacer(em(3.0));
+
+    // A declaration line with inline fill-in blanks to be written on, flowing
+    // with the surrounding words.
+    doc.paragraph(
+        text("I, ")
+            .fill_in(160.0)
+            .normal(", identified the specimen above as ")
+            .fill_in(160.0)
+            .normal("."),
+    );
+
     doc.spacer(em(2.0));
 
     // Hard line breaks ('\n' or Text::line_break) keep an address inside one

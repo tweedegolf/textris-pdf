@@ -25,9 +25,7 @@
 //! (for example a character that maps to a font's `.notdef` glyph, or a missing
 //! required attribute) surfaces as a [`RenderError`].
 
-use std::fmt;
-use std::num::NonZeroU16;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{fmt, num::NonZeroU16};
 
 use krilla::{
     Document as KrillaDocument, SerializeSettings,
@@ -446,37 +444,16 @@ fn attach_outline(stack: &mut [(u8, OutlineNode)], outline: &mut Outline, node: 
 }
 
 /// The current UTC time as a krilla [`DateTime`], for the document's creation
-/// date (required by PDF/A). Falls back to the Unix epoch if the system clock is
-/// before it.
+/// date (required by PDF/A).
 fn now_datetime() -> DateTime {
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    let (year, month, day) = civil_from_days(secs.div_euclid(86_400));
-    let tod = secs.rem_euclid(86_400);
-    DateTime::new(year.clamp(0, 9999) as u16)
-        .month(month)
-        .day(day)
-        .hour((tod / 3600) as u8)
-        .minute(((tod % 3600) / 60) as u8)
-        .second((tod % 60) as u8)
+    let now = time::OffsetDateTime::now_utc();
+    DateTime::new(now.year().clamp(0, 9999) as u16)
+        .month(now.month() as u8)
+        .day(now.day())
+        .hour(now.hour())
+        .minute(now.minute())
+        .second(now.second())
         .utc_offset_hour(0)
-}
-
-/// Convert a count of days since the Unix epoch to a `(year, month, day)` civil
-/// date (Howard Hinnant's algorithm), with month and day 1-based.
-fn civil_from_days(days: i64) -> (i64, u8, u8) {
-    let z = days + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097; // [0, 146096]
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365; // [0, 399]
-    let year = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
-    let mp = (5 * doy + 2) / 153; // [0, 11]
-    let day = (doy - (153 * mp + 2) / 5 + 1) as u8; // [1, 31]
-    let month = (if mp < 10 { mp + 3 } else { mp - 9 }) as u8; // [1, 12]
-    (year + if month <= 2 { 1 } else { 0 }, month, day)
 }
 
 fn solid_fill(color: rgb::Color) -> Fill {

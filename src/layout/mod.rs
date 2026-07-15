@@ -160,11 +160,17 @@ impl<'a> Engine<'a> {
         self.y = self.theme.page.content_top();
     }
 
-    /// Break to a new page if `height` would not fit and we are not already at
-    /// the top of a page (in which case breaking cannot help).
-    fn ensure(&mut self, height: f32) {
+    /// Whether `height` no longer fits on the current page *and* breaking to a
+    /// fresh page could help (we are not already at the top of one).
+    fn needs_break(&self, height: f32) -> bool {
         let page = &self.theme.page;
-        if self.y + height > page.content_bottom() && self.y > page.content_top() {
+        self.y + height > page.content_bottom() && self.y > page.content_top()
+    }
+
+    /// Break to a new page if `height` would not fit (see
+    /// [`needs_break`](Self::needs_break)).
+    fn ensure(&mut self, height: f32) {
+        if self.needs_break(height) {
             self.new_page();
         }
     }
@@ -369,9 +375,7 @@ impl<'a> Engine<'a> {
             unreachable!("a section starts with its heading");
         };
         let lead_gap = self.gap_before(prev, Kind::Heading(*level));
-        let content_top = self.theme.page.content_top();
-        let content_bottom = self.theme.page.content_bottom();
-        let page_height = content_bottom - content_top;
+        let page_height = self.theme.page.content_bottom() - self.theme.page.content_top();
         let section_height = self.measure_blocks(section, self.width());
         let keep_together =
             section_height <= self.theme.spacing.keep_together_max_fraction * page_height;
@@ -384,7 +388,7 @@ impl<'a> Engine<'a> {
             lead_gap + heading_height + min_follow
         };
 
-        if self.y + need > content_bottom && self.y > content_top {
+        if self.needs_break(need) {
             self.new_page();
         } else {
             self.y += lead_gap;

@@ -211,6 +211,29 @@ mod tests {
         assert!(long > short);
     }
 
+    /// The error kind `from_variable_files` fails with, panicking on success.
+    fn load_error_kind(path: &str) -> std::io::ErrorKind {
+        match Fonts::from_variable_files(path, path, path) {
+            Ok(_) => panic!("loading {path} should fail"),
+            Err(err) => err.kind(),
+        }
+    }
+
+    #[test]
+    fn from_variable_files_reports_unparsable_font_data() {
+        // Any existing non-font file: this very source file.
+        let src = concat!(env!("CARGO_MANIFEST_DIR"), "/src/fonts/mod.rs");
+        assert_eq!(load_error_kind(src), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn from_variable_files_reports_a_missing_file() {
+        assert_eq!(
+            load_error_kind("/nonexistent/font.ttf"),
+            std::io::ErrorKind::NotFound
+        );
+    }
+
     #[test]
     fn vertical_metrics_are_sane() {
         let fonts = test_fonts();

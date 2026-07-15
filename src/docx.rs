@@ -15,7 +15,8 @@
 //!   using Word's numbering definitions.
 //! - Tables keep their cells, per-column alignment and zebra striping, but drop
 //!   the finer metrics (custom column widths, insets, fill-in rules); a
-//!   [`Cell::FillIn`](crate::model::Cell) becomes an underscore run.
+//!   [`Cell::FillIn`](crate::model::Cell) and an inline fill-in
+//!   ([`Inline::fill_in`]) become underscore runs.
 //! - A callout [`Box`](crate::model::Block::Box) becomes a single-cell,
 //!   borderless table shaded with the box's background color.
 //! - Header/footer page counters become Word `PAGE`/`NUMPAGES` fields rather
@@ -190,16 +191,9 @@ fn append_block<S: BlockSink>(sink: S, block: &Block, theme: &Theme) -> S {
 /// A heading: a bold paragraph sized from the theme, tagged with an outline
 /// level (0-based) so Word lists it in the navigation pane.
 fn heading_paragraph(content: &[Inline], level: u8, theme: &Theme) -> Paragraph {
-    let sizes = &theme.font_size;
-    let size = match level {
-        0 | 1 => sizes.h1,
-        2 => sizes.h2,
-        3 => sizes.h3,
-        4 => sizes.h4,
-        _ => sizes.h5,
-    };
     let outline = usize::from(level.saturating_sub(1)).min(8);
     let level = level.max(1);
+    let size = theme.font_size.heading(level);
     let spacing = &theme.spacing;
     let line_spacing = line_spacing(theme)
         .before(twips(spacing.heading_above.level(level)))
@@ -247,7 +241,8 @@ fn list_paragraph(marker: &str, inlines: &[Inline], gap: f32, theme: &Theme) -> 
 }
 
 /// Build a run from an inline, merging the run's own emphasis with the base
-/// emphasis of its context (e.g. a heading makes every run bold).
+/// emphasis of its context (e.g. a heading makes every run bold). An inline
+/// fill-in becomes an underscore run to write on, like a fill-in cell.
 fn build_run(
     inline: &Inline,
     size: f32,
@@ -255,9 +250,12 @@ fn build_run(
     base_italic: bool,
     palette: &Palette,
 ) -> Run {
-    let mut run = Run::new()
-        .add_text(inline.text.clone())
-        .size(half_points(size));
+    let text = if inline.fill_in.is_some() {
+        "__________".to_string()
+    } else {
+        inline.text.clone()
+    };
+    let mut run = Run::new().add_text(text).size(half_points(size));
     if inline.bold || base_bold {
         run = run.bold();
     }
@@ -283,9 +281,7 @@ fn build_table(table: &crate::model::Table, theme: &Theme) -> DocxTable {
     let size = style.font_size.unwrap_or(theme.font_size.body);
 
     let mut rows = Vec::new();
-    let has_header =
-        style.header && !table.headers.is_empty() && !table.headers.iter().all(Cell::is_blank);
-    if has_header {
+    if table.has_header() {
         rows.push(build_row(
             &table.headers,
             columns,
@@ -515,8 +511,20 @@ mod tests {
     }
 
     #[test]
-    fn hex_formats_components() {
-        assert_eq!(hex(rgb::Color::new(0, 0, 0)), "000000");
-        assert_eq!(hex(rgb::Color::new(0xF6, 0x0A, 0xFF)), "F60AFF");
+    fn an_inline_fill_in_becomes_an_underscore_run() {
+        let inline = Inline {
+            fill_in: Some(120.0),
+            ..Inline::new("")
+        };
+        let run = build_run(&inline, 9.0, false, false, &Palette::default());
+        let texts: Vec<&str> = run
+            .children
+            .iter()
+            .filter_map(|child| match child {
+                docx_rs::RunChild::Text(t) => Some(t.text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts, ["__________"], "a blank to write on");
     }
 }

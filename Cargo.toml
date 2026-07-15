@@ -1,6 +1,6 @@
 [package]
 name = "textris-pdf"
-version = "0.6.0"
+version = "0.7.0"
 license = "MIT"
 edition = "2024"
 
@@ -8,6 +8,7 @@ edition = "2024"
 harfrust = "0.12.0"
 krilla = { version = "0.8.2", default-features = false }
 read-fonts = "0.41.0"
+time = { version = "0.3", default-features = false, features = ["std"] }
 docx-rs = { version = "0.4.20", optional = true }
 
 [features]

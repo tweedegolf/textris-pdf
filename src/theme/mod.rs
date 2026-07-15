@@ -6,8 +6,8 @@
 //! the builder with [`Textris::with_theme`](crate::build::Textris::with_theme).
 //!
 //! The theme holds *document-wide* tokens. Presentation choices that vary per
-//! element (how one table or one callout box looks) live in the [`style`]
-//! submodule ([`TableStyle`], [`BoxStyle`]) and are passed alongside the element
+//! element (how one table or one callout box looks) live in the per-element
+//! styles ([`TableStyle`], [`BoxStyle`]) and are passed alongside the element
 //! when it is added to the document.
 
 mod style;

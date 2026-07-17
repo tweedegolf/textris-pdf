@@ -42,6 +42,8 @@
 
 mod text;
 
+#[cfg(feature = "markdown-parser")]
+pub(crate) use text::normalize;
 pub use text::{
     IntoCell, IntoText, Text, blank, bold, cell, fill_in, italic, mono, muted, section_ref, spacer,
     text,
@@ -632,6 +634,48 @@ impl Textris {
     #[cfg(feature = "markdown")]
     pub fn write_markdown_to_file(&self, path: impl AsRef<Path>) -> io::Result<()> {
         std::fs::write(path, self.to_markdown())
+    }
+
+    /// Parse a [Markdown dialect](crate::markdown::parse) string and append
+    /// the resulting blocks to the document body.
+    ///
+    /// This is the inverse of [`to_markdown`](Self::to_markdown): document
+    /// content can be authored as (templated) Markdown text while the theme
+    /// stays on the builder. Chrome (title, language, headers, footers) can be
+    /// set either on the builder or from a
+    /// [front-matter block](crate::markdown::parse#front-matter) at the top of
+    /// the source, which this applies to the document (front matter overrides
+    /// only the fields it sets). Box `background` palette roles resolve against
+    /// this document's theme; the free
+    /// [`parse_markdown`](crate::markdown::parse_markdown) function uses the
+    /// default palette and rejects front matter.
+    ///
+    /// ```
+    /// # use textris_pdf::{build::Textris, markdown::ParseOptions};
+    /// let mut doc = Textris::new();
+    /// doc.push_markdown(
+    ///     "+++\ntitle = \"Observation form\"\n+++\n\n\
+    ///      # Observation form\n\nRecord *one* animal per form.\n",
+    ///     &ParseOptions::default(),
+    /// )?;
+    /// assert_eq!(doc.document().title.as_deref(), Some("Observation form"));
+    /// # Ok::<(), textris_pdf::markdown::MarkdownParseError>(())
+    /// ```
+    ///
+    /// Requires the `markdown-parser` cargo feature.
+    #[cfg(feature = "markdown-parser")]
+    pub fn push_markdown(
+        &mut self,
+        source: &str,
+        options: &crate::markdown::ParseOptions,
+    ) -> Result<(), crate::markdown::MarkdownParseError> {
+        let (front_matter, blocks) =
+            crate::markdown::parse::parse_document(source, options, &self.doc.theme.palette)?;
+        if let Some(front_matter) = front_matter {
+            front_matter.apply(&mut self.doc);
+        }
+        self.doc.blocks.extend(blocks);
+        Ok(())
     }
 }
 

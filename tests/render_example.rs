@@ -17,6 +17,11 @@
 //! tables (including fill-in and spacer cells), task lists, a boxed callout,
 //! both numbered and lettered ordered lists, a vertical spacer, and an
 //! explicit page break.
+//!
+//! With the `markdown-parser` feature, a second test
+//! ([`markdown_input_reproduces_the_builder_document`]) authors the very same
+//! guide as a Markdown-dialect string ([`tests/mantis-shrimp-example-input.md`])
+//! and asserts it parses back to the same document the builder produces.
 
 use std::path::Path;
 
@@ -77,7 +82,7 @@ fn renders_example_to_pdf_on_disk() {
             "markdown is missing the title heading"
         );
         assert!(
-            markdown.contains("> **Handle with care.**"),
+            markdown.contains(r"> **Handle with care\.**"),
             "markdown is missing the callout blockquote"
         );
         assert!(markdown.contains("| --- |"), "markdown is missing a table");
@@ -89,12 +94,12 @@ fn renders_example_to_pdf_on_disk() {
             "markdown headings should not be numbered"
         );
         assert!(
-            markdown.contains(r#""Vision""#),
+            markdown.contains(r#"\"Vision\""#),
             "references should repeat the section title in quotes"
         );
         // The footer contents sit at the bottom, below a rule.
         assert!(
-            markdown.trim_end().ends_with("Revision: `3`"),
+            markdown.trim_end().ends_with(r"Revision\: `3`"),
             "footer contents should be at the bottom of the markdown"
         );
         assert!(
@@ -107,6 +112,142 @@ fn renders_example_to_pdf_on_disk() {
         std::fs::write(&out, &markdown).expect("should write markdown to disk");
         assert!(out.exists());
     }
+}
+
+/// The inverse direction: the same field guide, authored end-to-end as a
+/// Markdown-dialect string in [`tests/mantis-shrimp-example-input.md`] (chrome
+/// in a `+++` front-matter block, body as dialect blocks), must reproduce the
+/// document that [`sample`] builds with the imperative API. This asserts the
+/// parsed body blocks are structurally identical to the built ones, checks the
+/// chrome parsed out of the front matter, then writes the parsed document out
+/// to `tests/mantis-shrimp-example-input.pdf` for inspection.
+///
+/// Two representation differences are expected. An empty header cell parses to
+/// [`Cell::Blank`] where the builder's `""` yields an empty [`Cell::Text`];
+/// both draw nothing, and [`canonical_blocks`] folds the former onto the latter
+/// before comparing. And the dialect has no inline-color syntax, so the
+/// front-matter footer is plain where the builder's is muted; the chrome check
+/// below compares text, not color.
+#[cfg(feature = "markdown-parser")]
+#[test]
+fn markdown_input_reproduces_the_builder_document() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let fonts = load_fonts().expect("fonts should load");
+
+    let from_builder = sample().build();
+    let from_markdown = sample_from_markdown().build();
+
+    // The body blocks must match exactly (modulo blank-cell representation).
+    let built = canonical_blocks(&from_builder.blocks);
+    let parsed = canonical_blocks(&from_markdown.blocks);
+    assert_eq!(
+        built.len(),
+        parsed.len(),
+        "block count differs: built {} vs parsed {}",
+        built.len(),
+        parsed.len()
+    );
+    for (i, (a, b)) in built.iter().zip(&parsed).enumerate() {
+        assert_eq!(
+            format!("{a:#?}"),
+            format!("{b:#?}"),
+            "block {i} differs between the builder and the Markdown input"
+        );
+    }
+
+    // Chrome comes entirely from the front matter, not from Rust.
+    assert_eq!(
+        from_markdown.title.as_deref(),
+        Some("The Mantis Shrimp: A Field Guide")
+    );
+    assert_eq!(from_markdown.language.as_deref(), Some("en"));
+    assert_eq!(
+        chrome_text(&from_markdown.header.right, 1, 1),
+        "Stomatopoda - Field Guide"
+    );
+    assert_eq!(chrome_text(&from_markdown.footer.left, 1, 1), "Revision: 3");
+    // The `{page}` / `{total}` footer value became a live page counter.
+    assert_eq!(
+        chrome_text(&from_markdown.footer.right, 3, 7),
+        "Page 3 of 7"
+    );
+
+    // The parsed document also renders to a valid PDF, written out for
+    // inspection alongside the builder's `mantis-shrimp-example.pdf`.
+    let pdf = sample_from_markdown()
+        .render(&fonts)
+        .expect("the Markdown-authored document should render as valid PDF/A-2A + PDF/UA-1");
+    assert!(pdf.starts_with(b"%PDF-"), "output is not a PDF");
+    assert!(pdf.len() > 4000, "PDF looks too small: {} bytes", pdf.len());
+    let out = root.join("tests/mantis-shrimp-example-input.pdf");
+    std::fs::write(&out, &pdf).expect("should write PDF to disk");
+    assert!(out.exists());
+}
+
+/// Build the field guide entirely from the Markdown-dialect input file: chrome
+/// (title, language, header, footer, page counter) comes from its `+++` front
+/// matter and the body from the dialect blocks, so no chrome is set in Rust.
+#[cfg(feature = "markdown-parser")]
+fn sample_from_markdown() -> Textris {
+    use textris_pdf::markdown::ParseOptions;
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let source = std::fs::read_to_string(root.join("tests/mantis-shrimp-example-input.md"))
+        .expect("the Markdown input fixture should be readable");
+
+    // Levels 3 and 4 are numbered sections here, matching the `h3_numbered` /
+    // `h4_numbered` calls in `sample`; the one plain `### About this guide`
+    // opts out with `{ numbered = false }` in the input file.
+    let options = ParseOptions {
+        numbered_heading_levels: vec![3, 4],
+        ..ParseOptions::default()
+    };
+    let mut doc = Textris::new();
+    doc.push_markdown(&source, &options)
+        .expect("the Markdown input fixture should parse");
+    doc
+}
+
+/// Resolve a header/footer slot for the given `(page, total)` and return its
+/// plain text, for asserting chrome parsed from front matter.
+#[cfg(feature = "markdown-parser")]
+fn chrome_text(slot: &Option<SectionContent>, page: usize, total: usize) -> String {
+    let content = slot
+        .as_ref()
+        .expect("chrome slot should be set from front matter");
+    textris_pdf::model::plain_text(&content.resolve(page, total))
+}
+
+/// Deep-clone `blocks`, folding an empty [`Cell::Text`] onto [`Cell::Blank`]
+/// (recursing into boxes) so the builder's `""` header cells and the parser's
+/// blank cells compare equal. Nothing else is normalized.
+#[cfg(feature = "markdown-parser")]
+fn canonical_blocks(blocks: &[textris_pdf::model::Block]) -> Vec<textris_pdf::model::Block> {
+    use textris_pdf::model::{Block, Cell};
+
+    blocks
+        .iter()
+        .cloned()
+        .map(|block| match block {
+            Block::Table(mut table) => {
+                for cell in table
+                    .headers
+                    .iter_mut()
+                    .chain(table.rows.iter_mut().flatten())
+                {
+                    if matches!(cell, Cell::Text(inlines) if inlines.is_empty()) {
+                        *cell = Cell::Blank;
+                    }
+                }
+                Block::Table(table)
+            }
+            Block::Box { style, content } => Block::Box {
+                style,
+                content: canonical_blocks(&content),
+            },
+            other => other,
+        })
+        .collect()
 }
 
 /// Load the fonts the example uses, Newsreader (roman + italic variable fonts)

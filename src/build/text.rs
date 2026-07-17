@@ -245,8 +245,9 @@ pub fn spacer(height: f32) -> Cell {
 }
 
 /// Drop empty runs and merge adjacent runs that share styling, so the layout
-/// engine sees clean, minimal input.
-fn normalize(inlines: Vec<Inline>) -> Vec<Inline> {
+/// engine sees clean, minimal input. Also used by the Markdown dialect parser
+/// so parsed inlines match what the builder would produce.
+pub(crate) fn normalize(inlines: Vec<Inline>) -> Vec<Inline> {
     let mut out: Vec<Inline> = Vec::with_capacity(inlines.len());
     for run in inlines {
         // A fill-in run carries no text but must survive; every other empty

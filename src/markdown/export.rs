@@ -12,9 +12,13 @@
 //! - **Emphasis** maps to `**bold**`, `*italic*`, `***bold italic***` and
 //!   `` `mono` `` (an inline code span). Inline [`color`](Inline::color) has no
 //!   portable Markdown form and is dropped.
-//! - **Text** is backslash-escaped so Markdown metacharacters render literally
-//!   rather than as accidental formatting. Content inside a `` `mono` `` run is
-//!   emitted verbatim (Markdown does not escape inside code spans).
+//! - **Text** is backslash-escaped (every ASCII punctuation character, the set
+//!   shared with the [dialect escaping](super::escape)) so Markdown
+//!   metacharacters render literally rather than as accidental formatting.
+//!   Content inside a `` `mono` `` run is emitted verbatim (Markdown does not
+//!   escape inside code spans), except that newlines fold to spaces (a code
+//!   span cannot hold a line break) and, within table cells, pipes and
+//!   backslashes are encoded (see [`mono_cell`](super::mono_cell)).
 //! - **Hard line breaks** (a `'\n'` within a run) become Markdown hard breaks
 //!   (a line ending in two spaces).
 //! - **Tables** become GitHub-flavored tables, keeping per-column alignment in
@@ -42,10 +46,20 @@
 //! [`Textris::to_markdown`](crate::build::Textris::to_markdown) and
 //! [`Textris::write_markdown_to_file`](crate::build::Textris::write_markdown_to_file).
 
+use super::escape::{escape_punctuation, mono, mono_cell};
 use crate::{
     model::{Block, Cell, Chrome, Document, Inline, SectionContent, Table},
     theme::Align,
 };
+
+/// The context an inline run is rendered in: flowing text keeps `'\n'` hard
+/// breaks for a later pass, while a table cell must stay on one line, so its
+/// breaks become `<br>` and its code spans encode pipes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InlineContext {
+    Flow,
+    Cell,
+}
 
 /// Translate a [`Document`] into a GitHub-flavored Markdown string.
 ///
@@ -91,8 +105,8 @@ fn render_footer(footer: &Chrome) -> Option<String> {
 /// pages to count without pagination, so it yields `None` and is dropped.
 fn section_text(content: &SectionContent) -> Option<String> {
     match content {
-        SectionContent::Text(text) => Some(escape(text)),
-        SectionContent::Spans(spans) => Some(render_inlines(spans)),
+        SectionContent::Text(text) => Some(escape_punctuation(text)),
+        SectionContent::Spans(spans) => Some(render_inlines(spans, InlineContext::Flow)),
         SectionContent::PageCounter(_) => None,
     }
 }
@@ -114,7 +128,7 @@ fn render_block(block: &Block) -> Option<String> {
             let hashes = "#".repeat((*level).clamp(1, 6) as usize);
             format!("{hashes} {}", inline_line(content))
         }
-        Block::Paragraph(inlines) => hard_breaks(&render_inlines(inlines)),
+        Block::Paragraph(inlines) => hard_breaks(&render_inlines(inlines, InlineContext::Flow)),
         Block::Table(table) => render_table(table),
         Block::TaskList(items) => items
             .iter()
@@ -147,7 +161,7 @@ fn render_block(block: &Block) -> Option<String> {
 /// with any hard breaks continued at an indent that aligns past the marker.
 fn list_item(prefix: &str, inlines: &[Inline]) -> String {
     let indent = " ".repeat(prefix.chars().count() + 1);
-    let body = render_inlines(inlines).replace('\n', &format!("  \n{indent}"));
+    let body = render_inlines(inlines, InlineContext::Flow).replace('\n', &format!("  \n{indent}"));
     format!("{prefix} {body}")
 }
 
@@ -209,11 +223,15 @@ fn row_line(cells: &[String]) -> String {
 }
 
 /// The Markdown for a single table cell. Missing, blank and spacer cells are
-/// empty; a fill-in cell becomes an underscore run. Newlines become `<br>` and
-/// pipes are escaped, as a cell must stay on one line and inside the table grid.
+/// empty; a fill-in cell becomes an underscore run. Newlines become `<br>`, as
+/// a cell must stay on its source line; pipes are escaped by the punctuation
+/// escaping (and by [`mono_cell`] inside code spans), keeping the table grid
+/// intact.
 fn cell_text(cell: Option<&Cell>) -> String {
     match cell {
-        Some(Cell::Text(inlines)) => escape_pipes(&render_inlines(inlines).replace('\n', "<br>")),
+        Some(Cell::Text(inlines)) => {
+            render_inlines(inlines, InlineContext::Cell).replace('\n', "<br>")
+        }
         Some(Cell::FillIn) => "________".to_string(),
         _ => String::new(),
     }
@@ -222,25 +240,31 @@ fn cell_text(cell: Option<&Cell>) -> String {
 /// Render inlines for a context that must stay on one line (a heading): hard
 /// breaks collapse to spaces.
 fn inline_line(inlines: &[Inline]) -> String {
-    render_inlines(inlines).replace('\n', " ")
+    render_inlines(inlines, InlineContext::Flow).replace('\n', " ")
 }
 
 /// Render a run of inlines to Markdown.
-fn render_inlines(inlines: &[Inline]) -> String {
-    inlines.iter().map(render_inline).collect()
+fn render_inlines(inlines: &[Inline], context: InlineContext) -> String {
+    inlines
+        .iter()
+        .map(|inline| render_inline(inline, context))
+        .collect()
 }
 
 /// Render one inline run: an underscore blank for a fill-in, an inline code
 /// span for `mono`, otherwise the escaped text wrapped in the run's emphasis
 /// markers.
-fn render_inline(inline: &Inline) -> String {
+fn render_inline(inline: &Inline, context: InlineContext) -> String {
     if inline.fill_in.is_some() {
         return "________".to_string();
     }
     if inline.mono {
-        return code_span(&inline.text);
+        return match context {
+            InlineContext::Flow => mono(&inline.text),
+            InlineContext::Cell => mono_cell(&inline.text),
+        };
     }
-    let escaped = escape(&inline.text);
+    let escaped = escape_punctuation(&inline.text);
     let marker = match (inline.bold, inline.italic) {
         (true, true) => "***",
         (true, false) => "**",
@@ -262,55 +286,6 @@ fn render_inline(inline: &Inline) -> String {
     )
 }
 
-/// Wrap `text` in an inline code span, choosing a backtick fence long enough to
-/// contain any backticks inside it (and padding with spaces when the text would
-/// otherwise touch the fence).
-fn code_span(text: &str) -> String {
-    if text.is_empty() {
-        return String::new();
-    }
-    let longest = text.split(|c| c != '`').map(str::len).max().unwrap_or(0);
-    let fence = "`".repeat(longest + 1);
-    if text.starts_with('`') || text.ends_with('`') {
-        format!("{fence} {text} {fence}")
-    } else {
-        format!("{fence}{text}{fence}")
-    }
-}
-
-/// Backslash-escape the Markdown metacharacters that would otherwise trigger
-/// inline formatting, so the text renders literally. Pipes are left alone here
-/// and handled per-table-cell by [`escape_pipes`], since `|` is only special
-/// inside a table.
-fn escape(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for ch in text.chars() {
-        if matches!(
-            ch,
-            '\\' | '`' | '*' | '_' | '[' | ']' | '<' | '>' | '#' | '~'
-        ) {
-            out.push('\\');
-        }
-        out.push(ch);
-    }
-    out
-}
-
-/// Escape any unescaped `|` as `\|`, which GitHub-flavored Markdown reads as a
-/// literal pipe within a table cell (even inside a code span).
-fn escape_pipes(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut escaped = false;
-    for ch in text.chars() {
-        if ch == '|' && !escaped {
-            out.push('\\');
-        }
-        out.push(ch);
-        escaped = ch == '\\' && !escaped;
-    }
-    out
-}
-
 /// Turn `'\n'` hard breaks into Markdown hard breaks (a line ending in two
 /// spaces).
 fn hard_breaks(text: &str) -> String {
@@ -319,7 +294,6 @@ fn hard_breaks(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::{
         build::{Textris, bold, cell, fill_in, mono, muted, text},
         model::{ListMarker, SectionContent},
@@ -355,6 +329,15 @@ mod tests {
     }
 
     #[test]
+    fn all_ascii_punctuation_is_escaped() {
+        let mut doc = Textris::new();
+        doc.paragraph("Costa, R. (observer)");
+        // Every ASCII punctuation character is escaped, the same set the
+        // dialect parser unescapes, so exporter output parses back cleanly.
+        assert!(doc.to_markdown().contains(r"Costa\, R\. \(observer\)"));
+    }
+
+    #[test]
     fn mono_run_is_verbatim_inside_a_code_span() {
         let mut doc = Textris::new();
         // Emphasis characters inside a code span must not be escaped.
@@ -363,10 +346,11 @@ mod tests {
     }
 
     #[test]
-    fn code_span_grows_the_fence_past_inner_backticks() {
-        assert_eq!(code_span("plain"), "`plain`");
-        assert_eq!(code_span("a`b"), "``a`b``");
-        assert_eq!(code_span("`x`"), "`` `x` ``");
+    fn mono_folds_hard_breaks_to_spaces() {
+        let mut doc = Textris::new();
+        // A code span cannot hold a line break, so the newline becomes a space.
+        doc.paragraph(mono("STO\n2026"));
+        assert!(doc.to_markdown().contains("`STO 2026`"));
     }
 
     #[test]
@@ -401,7 +385,7 @@ mod tests {
         let mut doc = Textris::new();
         doc.paragraph(text("My name is ").fill_in(120.0).normal("."));
         let md = doc.to_markdown();
-        assert!(md.contains("My name is ________."), "{md}");
+        assert!(md.contains(r"My name is ________\."), "{md}");
     }
 
     #[test]
@@ -437,9 +421,9 @@ mod tests {
             b.paragraph("Body.");
         });
         let md = doc.to_markdown();
-        assert!(md.contains("> **Note.**"), "{md}");
+        assert!(md.contains(r"> **Note\.**"), "{md}");
         // A blank quoted line keeps the two paragraphs in one blockquote.
-        assert!(md.contains("> **Note.**\n>\n> Body."), "{md}");
+        assert!(md.contains("> **Note\\.**\n>\n> Body\\."), "{md}");
     }
 
     #[test]
@@ -462,8 +446,9 @@ mod tests {
         // The heading text stays plain, with no "1." prefix...
         assert!(md.contains("### Vision"), "{md}");
         assert!(!md.contains("### 1."), "{md}");
-        // ...and the reference repeats the section title in quotes.
-        assert!(md.contains(r#"see "Vision""#), "{md}");
+        // ...and the reference repeats the section title in quotes (escaped,
+        // like all punctuation).
+        assert!(md.contains(r#"see \"Vision\""#), "{md}");
     }
 
     #[test]
@@ -476,7 +461,7 @@ mod tests {
             text(format!("Page {page} of {total}"))
         }));
         let md = doc.to_markdown();
-        assert!(md.ends_with("---\n\nRevision: `3`\n"), "{md}");
+        assert!(md.ends_with("---\n\nRevision\\: `3`\n"), "{md}");
         assert!(!md.contains("Page"), "page counter should be dropped: {md}");
     }
 
@@ -484,6 +469,6 @@ mod tests {
     fn document_without_a_footer_has_no_trailing_rule() {
         let mut doc = Textris::new();
         doc.paragraph("Body.");
-        assert_eq!(doc.to_markdown(), "Body.\n");
+        assert_eq!(doc.to_markdown(), "Body\\.\n");
     }
 }

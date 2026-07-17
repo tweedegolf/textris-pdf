@@ -12,6 +12,7 @@ time = { version = "0.3", default-features = false, features = ["std"] }
 docx-rs = { version = "0.4.20", optional = true }
 
 [features]
-default = ["markdown"]
+default = ["markdown", "markdown-parser"]
 docx = ["dep:docx-rs"]
 markdown = []
+markdown-parser = ["markdown"]

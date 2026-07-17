@@ -106,6 +106,75 @@ Header and footer sections additionally accept
 `SectionContent::page_counter(|page, total| …)` for a `Page N of M` counter,
 filled in once the total page count is known.
 
+## Markdown, docx
+
+Besides the PDF pipeline there are structural exports, and a Markdown *input*
+path, behind cargo features:
+
+| Feature | Adds |
+| --- | --- |
+| `markdown` (default) | `Textris::to_markdown` / `write_markdown_to_file`: export as GitHub-flavored Markdown |
+| `markdown-parser` | `Textris::push_markdown` / `markdown::parse_markdown`: author document bodies as Markdown text |
+| `docx` | `Textris::to_docx` / `write_docx_to_file`: export as a Word file |
+
+With `markdown-parser` enabled, a whole document can come from a (templated)
+Markdown dialect string: the body as dialect blocks, and document chrome
+(title, language, header/footer) as an optional `+++` front-matter block at the
+top. Only the theme stays in Rust.
+
+```rust
+use textris_pdf::{build::Textris, markdown::ParseOptions};
+
+let source = "\
++++
+title = \"Observation form\"
+language = \"en\"
+header_right = \"Field guide\"
+footer_right = \"Page {page} of {total}\"
++++
+
+# Observation form
+
+Record **one** animal per form.
+";
+
+let options = ParseOptions {
+    numbered_heading_levels: vec![3], // `###` sections get "1.", "2.", …
+    ..ParseOptions::default()
+};
+let mut doc = Textris::new();
+doc.push_markdown(source, &options)?;   // applies the front-matter chrome too
+doc.render_to_file("form.pdf", &fonts)?;
+```
+
+Chrome can equally be set on the builder in Rust; front matter just lets a
+self-contained file carry it. A chrome value with `{page}` / `{total}`
+placeholders becomes a page counter.
+
+The body dialect is GitHub-flavored Markdown restricted to what the document
+model can express, plus attribute lines (`{ striped = false, widths = "auto 4
+3" }` binding to the next block) and directives (`@pagebreak`, `@spacer(2em)`);
+underscore runs are fill-in lines (`___(120)` for an explicit width) and
+`[#label]` references a heading's section number. The parser is strict:
+unknown attributes, malformed tables and unterminated emphasis are errors with
+a line number, not best-effort text. The full dialect reference lives in the
+[`markdown::parse` rustdoc](src/markdown/parse.rs).
+[`tests/mantis-shrimp-example-input.md`](tests/mantis-shrimp-example-input.md)
+is a complete example: it re-authors the entire bundled field guide (chrome and
+body) as dialect text, and a test asserts it parses back to the very same
+document the builder produces.
+
+The free [`markdown::parse_markdown`](src/markdown/parse.rs) function returns
+body blocks only and rejects front matter (it has no document to apply chrome
+to); use `Textris::push_markdown` for front matter.
+
+When templating, interpolated data must pass through the crate's escape
+functions (`markdown::escape`, `escape_cell`, `mono`, `mono_cell`) so
+untrusted values can never change document structure; wire them up as the
+template engine's auto-escaper and filters (askama: a custom escaper for the
+`.md` extension; minijinja: `set_auto_escape_callback`). Never HTML-escape a
+dialect template.
+
 ## Accessibility
 
 Every document renders to a **tagged PDF** that conforms to both **PDF/A-2A**

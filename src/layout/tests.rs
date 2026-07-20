@@ -409,6 +409,132 @@ fn headings_are_never_orphaned_at_the_bottom_of_a_page() {
 }
 
 #[test]
+fn list_item_taller_than_a_page_flows_across_pages() {
+    let fonts = test_fonts();
+    let theme = Theme::default();
+    let mut doc = Textris::new();
+    doc.bullet_list(["word ".repeat(2000)]);
+    let pages = layout(&doc.build(), &fonts);
+    assert!(pages.len() >= 2, "the item should span pages");
+    for (index, page) in pages.iter().enumerate() {
+        for text in texts(page) {
+            assert!(
+                text.baseline <= theme.page.content_bottom() + 0.01,
+                "text below the bottom margin on page {index}: {}",
+                text.baseline
+            );
+        }
+    }
+}
+
+#[test]
+fn box_taller_than_a_page_flows_with_a_background_per_page() {
+    let fonts = test_fonts();
+    let theme = Theme::default();
+    let mut doc = Textris::new();
+    doc.boxed(|b| {
+        b.paragraph("word ".repeat(1500));
+    });
+    doc.paragraph("afterwards");
+    let pages = layout(&doc.build(), &fonts);
+    assert!(pages.len() >= 2, "the box should span pages");
+
+    for (index, page) in pages.iter().enumerate() {
+        let segment = page.elements.iter().find_map(|e| match e {
+            Element::Rect { y, h, .. } => Some((*y, *h)),
+            _ => None,
+        });
+        // Every page holding box text carries a background segment that stays
+        // within the content box and covers that text.
+        let box_lines: Vec<f32> = texts(page)
+            .iter()
+            .filter(|t| t.text.contains("word"))
+            .map(|t| t.baseline)
+            .collect();
+        if box_lines.is_empty() {
+            continue;
+        }
+        let (top, height) = segment.expect("box text without a background segment");
+        assert!(
+            top + height <= theme.page.content_bottom() + 0.01,
+            "background overflows the bottom margin on page {index}"
+        );
+        for baseline in box_lines {
+            assert!(
+                baseline >= top && baseline <= top + height,
+                "box text outside its background on page {index}"
+            );
+        }
+    }
+
+    // The pen stays in sync: the following paragraph lands on the last page,
+    // inside the content box.
+    let after = pages
+        .iter()
+        .flat_map(|p| texts(p))
+        .find(|t| t.text.contains("afterwards"))
+        .expect("the paragraph after the box");
+    assert!(after.baseline <= theme.page.content_bottom() + 0.01);
+}
+
+#[test]
+fn heading_before_a_tall_table_stays_with_the_table_start() {
+    let fonts = test_fonts();
+    let theme = Theme::default();
+    // A table too tall to keep together, preceded by a heading that a spacer
+    // pushes toward the page bottom. Sweeping the spacer height in fine steps
+    // walks the heading through the critical window at the bottom of the page.
+    for step in 0..50 {
+        let spacer = 480.0 + step as f32 * 4.0;
+        let mut doc = Textris::new();
+        doc.paragraph("top");
+        doc.spacer(spacer);
+        doc.h3("Data");
+        doc.table_with(|t| {
+            t.headers(["a", "b"]);
+            for i in 0..60 {
+                t.row([format!("row{i}"), "x".to_string()]);
+            }
+        });
+        let pages = layout(&doc.build(), &fonts);
+        let heading_page = page_of(&pages, "Data", theme.font_size.h3);
+        let row_page = page_of(&pages, "row0", theme.font_size.body);
+        assert_eq!(
+            heading_page, row_page,
+            "with a {spacer}pt spacer the heading was stranded"
+        );
+    }
+}
+
+#[test]
+fn empty_headings_are_skipped() {
+    let fonts = test_fonts();
+    let mut doc = Textris::new();
+    doc.h1("");
+    doc.h2("   ");
+    doc.paragraph("Body.");
+    let laid_out = layout(&doc.build(), &fonts);
+    assert!(
+        laid_out.outline.is_empty(),
+        "empty headings must not produce bookmarks"
+    );
+    // Only the paragraph produces text.
+    let all_texts = texts(&laid_out.pages[0]);
+    assert_eq!(all_texts.len(), 1);
+    assert_eq!(all_texts[0].text, "Body.");
+}
+
+#[test]
+fn tabs_separate_words_like_spaces() {
+    let fonts = test_fonts();
+    let mut doc = Textris::new();
+    doc.paragraph("alpha\tbeta");
+    let pages = layout(&doc.build(), &fonts);
+    // The tab never reaches the shaper: the words merge back with a space.
+    assert_eq!(texts(&pages[0])[0].text, "alpha beta");
+}
+
+#[test]
 fn short_section_is_pushed_to_next_page_instead_of_splitting() {
     let fonts = test_fonts();
     let theme = Theme::default();

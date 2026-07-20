@@ -668,14 +668,14 @@ impl Textris {
         &mut self,
         source: &str,
         options: &crate::markdown::ParseOptions,
-    ) -> Result<(), crate::markdown::MarkdownParseError> {
+    ) -> Result<&mut Self, crate::markdown::MarkdownParseError> {
         let (front_matter, blocks) =
             crate::markdown::parse::parse_document(source, options, &self.doc.theme.palette)?;
         if let Some(front_matter) = front_matter {
             front_matter.apply(&mut self.doc);
         }
         self.doc.blocks.extend(blocks);
-        Ok(())
+        Ok(self)
     }
 }
 

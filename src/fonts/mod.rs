@@ -15,6 +15,9 @@
 //! Variation coordinates (axis tag + value) are applied both when embedding a
 //! font and before every shaping pass, so measurement and drawing agree on the
 //! exact instance.
+//!
+//! Shaping is left-to-right only: right-to-left scripts (Hebrew, Arabic) are
+//! not supported and would render in the wrong visual order.
 
 mod face;
 

@@ -24,7 +24,7 @@ impl Engine<'_> {
         height
     }
 
-    fn task_item_height(&self, item: &TaskItem, width: f32) -> f32 {
+    pub(super) fn task_item_height(&self, item: &TaskItem, width: f32) -> f32 {
         let size = self.theme.font_size.body;
         let line_h = size * self.theme.spacing.line_height;
         let box_size = self.theme.checkbox.size;
@@ -63,9 +63,10 @@ impl Engine<'_> {
         let words = self.tokenize(&item.content, false, false, size);
         let lines = self.wrap(words, text_width, size);
         let content_h = lines.len() as f32 * line_h;
-        let height = content_h.max(box_size);
 
-        self.ensure(height);
+        // Keep the item together when it fits a page; a taller item flows
+        // line by line below.
+        self.ensure(content_h.max(box_size));
         let top = self.y;
 
         // Center the box on the first line's visible text — the cap-height
@@ -77,12 +78,16 @@ impl Engine<'_> {
         self.draw_checkbox(content_left, box_y, box_size, item.checked);
 
         self.current_tag = body_tag;
-        let mut line_top = top;
         for line in &lines {
-            self.draw_line(line, text_x, line_top, size, text_color);
-            line_top += line_h;
+            self.ensure(line_h);
+            self.draw_line(line, text_x, self.y, size, text_color);
+            self.y += line_h;
         }
-        self.y = top + height;
+        // A short item is still at least as tall as its checkbox; a single
+        // line never breaks, so `top` is on the current page here.
+        if content_h < box_size {
+            self.y = top + box_size;
+        }
     }
 
     fn draw_checkbox(&mut self, x: f32, y: f32, size: f32, checked: bool) {
@@ -121,19 +126,23 @@ impl Engine<'_> {
     /// The height a bullet or ordered list would occupy at the given width.
     /// Both list forms share their geometry, so one measurement serves both.
     pub(super) fn list_height(&self, items: &[Vec<Inline>], width: f32) -> f32 {
-        let size = self.theme.font_size.body;
-        let line_h = size * self.theme.spacing.line_height;
-        let text_width = width - self.theme.list.bullet_indent;
         let mut height = 0.0;
         for (index, item) in items.iter().enumerate() {
             if index > 0 {
                 height += self.theme.list.bullet_gap;
             }
-            let words = self.tokenize(item, false, false, size);
-            let lines = self.wrap(words, text_width, size);
-            height += (lines.len() as f32 * line_h).max(line_h);
+            height += self.marker_item_height(item, width);
         }
         height
+    }
+
+    /// The height one bullet or ordered-list item's wrapped text occupies.
+    pub(super) fn marker_item_height(&self, item: &[Inline], width: f32) -> f32 {
+        let size = self.theme.font_size.body;
+        let line_h = size * self.theme.spacing.line_height;
+        let words = self.tokenize(item, false, false, size);
+        let lines = self.wrap(words, width - self.theme.list.bullet_indent, size);
+        (lines.len() as f32 * line_h).max(line_h)
     }
 
     pub(super) fn layout_bullet_list(&mut self, items: &[Vec<Inline>]) {
@@ -174,8 +183,9 @@ impl Engine<'_> {
             }
             let words = self.tokenize(item, false, false, size);
             let lines = self.wrap(words, text_width, size);
-            let height = (lines.len() as f32 * line_h).max(line_h);
-            self.ensure(height);
+            // Keep the item together when it fits a page; a taller item flows
+            // line by line below.
+            self.ensure((lines.len() as f32 * line_h).max(line_h));
             let top = self.y;
 
             self.structure.open(StructTag::ListItem);
@@ -199,14 +209,13 @@ impl Engine<'_> {
             // The wrapped item text: the body.
             let body_id = self.structure.leaf(StructTag::Body);
             self.current_tag = Tagging::Content(body_id);
-            let mut line_top = top;
             for line in &lines {
-                self.draw_line(line, text_x, line_top, size, text_color);
-                line_top += line_h;
+                self.ensure(line_h);
+                self.draw_line(line, text_x, self.y, size, text_color);
+                self.y += line_h;
             }
 
             self.structure.close();
-            self.y = top + height;
         }
         self.structure.close();
     }

@@ -53,14 +53,24 @@ use crate::{
     theme::Theme,
 };
 
-/// An error produced while serializing the PDF, most commonly a validation
-/// failure against the PDF/A-2A or PDF/UA-1 profile.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RenderError(KrillaError);
+/// An error produced while rendering the PDF.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RenderError {
+    /// The theme's page width or height is not a positive, finite size.
+    InvalidPageSize { width: f32, height: f32 },
+    /// krilla failed to serialize the document, most commonly a validation
+    /// failure against the PDF/A-2A or PDF/UA-1 profile.
+    Serialize(KrillaError),
+}
 
 impl fmt::Display for RenderError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "failed to serialize PDF: {}", self.0)
+        match self {
+            Self::InvalidPageSize { width, height } => {
+                write!(f, "invalid page size: {width} x {height} pt")
+            }
+            Self::Serialize(error) => write!(f, "failed to serialize PDF: {error}"),
+        }
     }
 }
 
@@ -68,6 +78,10 @@ impl std::error::Error for RenderError {}
 
 /// Render a laid-out document plus its chrome into tagged PDF/A-2A + PDF/UA-1
 /// bytes.
+///
+/// `layout` must be the result of [`layout`](crate::layout::layout) for this
+/// same `document` (and the same `fonts`): the structure tree indexes into
+/// node ids allocated during layout, and a mismatched pair panics.
 pub fn render(layout: &Layout, document: &Document, fonts: &Fonts) -> Result<Vec<u8>, RenderError> {
     let configuration = ConfigurationBuilder::new()
         .with_archival_validator(Archival::A2_A)
@@ -89,8 +103,12 @@ pub fn render(layout: &Layout, document: &Document, fonts: &Fonts) -> Result<Vec
     let mut idents: Vec<Vec<Identifier>> = vec![Vec::new(); layout.nodes];
 
     for (index, page) in layout.pages.iter().enumerate() {
-        let settings = PageSettings::from_wh(theme.page.width, theme.page.height)
-            .expect("valid page dimensions");
+        let settings = PageSettings::from_wh(theme.page.width, theme.page.height).ok_or(
+            RenderError::InvalidPageSize {
+                width: theme.page.width,
+                height: theme.page.height,
+            },
+        )?;
         let mut krilla_page = pdf.start_page_with(settings);
         let mut surface = krilla_page.surface();
 
@@ -161,7 +179,7 @@ pub fn render(layout: &Layout, document: &Document, fonts: &Fonts) -> Result<Vec
     // A bookmark outline (required by PDF/UA), nested by heading level.
     pdf.set_outline(build_outline(&layout.outline, &title));
 
-    pdf.finish().map_err(RenderError)
+    pdf.finish().map_err(RenderError::Serialize)
 }
 
 /// Draw one display-list element, wrapped in the marked-content sequence its
@@ -316,16 +334,38 @@ fn draw_chrome(
     }
 }
 
+/// Chrome is a single line: fold every whitespace character (including the
+/// hard breaks body text honors) to a space and drop other control
+/// characters, which have no glyph and would fail shaping.
+fn chrome_text(text: &str) -> String {
+    text.chars()
+        .filter_map(|c| {
+            if c.is_whitespace() {
+                Some(' ')
+            } else if c.is_control() {
+                None
+            } else {
+                Some(c)
+            }
+        })
+        .collect()
+}
+
 /// The rendered width of a sequence of styled runs, for alignment purposes.
+/// Mirrors how [`draw_spans`] advances, including fill-in blanks.
 fn spans_width(spans: &[Inline], fonts: &Fonts, size: f32) -> f32 {
     spans
         .iter()
-        .map(|sp| fonts.measure(sp.resolve_style(false, false), &sp.text, size))
+        .map(|sp| match sp.fill_in {
+            Some(width) => width,
+            None => fonts.measure(sp.resolve_style(false, false), &chrome_text(&sp.text), size),
+        })
         .sum()
 }
 
 /// Draw a sequence of styled runs left-to-right starting at `x`, each run its
-/// own artifact marked-content sequence.
+/// own artifact marked-content sequence. A fill-in run draws its blank line
+/// along the baseline, as in body text.
 #[allow(clippy::too_many_arguments)]
 fn draw_spans(
     surface: &mut Surface,
@@ -344,20 +384,26 @@ fn draw_spans(
             .color
             .map(|c| c.resolve(&theme.palette))
             .unwrap_or(text_color);
-        let shaped = fonts.shape(style, &span.text);
         surface.start_tagged(ContentTag::Artifact(Artifact::with_kind(artifact)));
-        surface.set_stroke(None);
-        surface.set_fill(Some(solid_fill(color)));
-        surface.draw_glyphs(
-            Point::from_xy(x, baseline),
-            &shaped.glyphs,
-            fonts.krilla_font(style),
-            &span.text,
-            size,
-            false,
-        );
+        if let Some(width) = span.fill_in {
+            draw_stroke(surface, &[(x, baseline), (x + width, baseline)], 0.7, color, false);
+            x += width;
+        } else {
+            let text = chrome_text(&span.text);
+            let shaped = fonts.shape(style, &text);
+            surface.set_stroke(None);
+            surface.set_fill(Some(solid_fill(color)));
+            surface.draw_glyphs(
+                Point::from_xy(x, baseline),
+                &shaped.glyphs,
+                fonts.krilla_font(style),
+                &text,
+                size,
+                false,
+            );
+            x += shaped.width(size);
+        }
         surface.end_tagged();
-        x += shaped.width(size);
     }
 }
 

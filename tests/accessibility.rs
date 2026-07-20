@@ -97,6 +97,42 @@ fn a_table_cell_spanning_multiple_pages_still_renders_accessibly() {
 }
 
 #[test]
+fn chrome_handles_hard_breaks_and_fill_ins() {
+    use textris_pdf::build::text;
+    let fonts = load_fonts();
+    let mut doc = Textris::new();
+    doc.h1("Chrome");
+    // A hard break folds to a space (chrome is a single line); a fill-in run
+    // draws its blank line instead of failing shaping.
+    doc.header_left(text("line one").line_break().normal("line two"));
+    doc.footer_left(text("Signature: ").fill_in(80.0));
+    doc.render(&fonts)
+        .expect("chrome with hard breaks and fill-ins should render");
+}
+
+#[test]
+fn an_empty_heading_is_skipped_rather_than_fatal() {
+    let fonts = load_fonts();
+    let mut doc = Textris::new();
+    doc.title("Empty heading");
+    doc.h1("");
+    doc.paragraph("Body.");
+    doc.render(&fonts)
+        .expect("an empty heading must not fail PDF/UA validation");
+}
+
+#[test]
+fn an_invalid_page_size_is_an_error_not_a_panic() {
+    use textris_pdf::render::RenderError;
+    let fonts = load_fonts();
+    let mut doc = Textris::new();
+    doc.paragraph("Body.");
+    doc.theme_mut().page.width = 0.0;
+    let error = doc.render(&fonts).expect_err("zero page width must fail");
+    assert!(matches!(error, RenderError::InvalidPageSize { .. }));
+}
+
+#[test]
 fn a_document_without_headings_still_renders_accessibly() {
     let fonts = load_fonts();
     let mut doc = Textris::new();

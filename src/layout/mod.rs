@@ -232,15 +232,20 @@ impl<'a> Engine<'a> {
         let text_color = self.theme.palette.text;
         match block {
             Block::Heading { level, content, .. } => {
-                let size = self.theme.font_size.heading(*level);
                 let title = plain_text(content);
+                // A heading with no visible text draws nothing and is skipped
+                // entirely: an empty title would fail PDF/UA validation.
+                if title.trim().is_empty() {
+                    return;
+                }
+                let size = self.theme.font_size.heading(*level);
                 let id = self.structure.leaf(StructTag::Heading {
                     level: *level,
                     title: title.clone(),
                 });
-                // A section is pre-fitted by `layout_section` (and boxes are
-                // kept together), so the current page and pen are where the
-                // heading will actually be drawn: capture them for the bookmark.
+                // The heading is drawn at the current page and pen (sections
+                // are pre-fitted by `layout_section`): capture them for the
+                // bookmark.
                 self.outline.push(OutlineEntry {
                     level: *level,
                     title,
@@ -301,13 +306,14 @@ impl<'a> Engine<'a> {
     /// background makes the leading below a line visible, so a heading would
     /// otherwise hug the top edge and push its content away. Unlike
     /// [`layout_section`](Self::layout_section) this applies no keep-together
-    /// logic. Must advance `y` by exactly the height that
-    /// [`measure_box_blocks`](Self::measure_box_blocks) reports.
-    fn layout_box_blocks(&mut self, blocks: &[Block]) {
+    /// logic. Walks the same gap arithmetic as
+    /// [`measure_box_blocks`](Self::measure_box_blocks), so the two agree on
+    /// where content lands. Returns the last block laid out, whose trailing
+    /// leading the caller trims off the box bottom.
+    fn layout_box_blocks<'b>(&mut self, blocks: &'b [Block]) -> Option<&'b Block> {
         let mut prev: Option<&Block> = None;
         for block in blocks {
-            // A box is kept together on one page; a page break inside it has
-            // no meaning.
+            // A page break inside a callout has no meaning.
             if matches!(block, Block::PageBreak) {
                 continue;
             }
@@ -322,10 +328,13 @@ impl<'a> Engine<'a> {
             self.layout_block(block);
             prev = Some(block);
         }
+        prev
     }
 
     /// Lay out a boxed callout: a filled background with padding and margin,
-    /// wrapping its child blocks. The box is kept together on one page.
+    /// wrapping its child blocks. A box that fits on one page is kept
+    /// together; a taller one flows across pages, its background drawn as one
+    /// segment per page.
     fn layout_box(&mut self, style: &BoxStyle, content: &[Block]) {
         let box_left = self.left + style.margin_x;
         let box_right = self.right - style.margin_x;
@@ -340,33 +349,59 @@ impl<'a> Engine<'a> {
 
         self.y += style.margin_y;
         let box_top = self.y;
-        self.push(Element::Rect {
-            x: box_left,
-            y: box_top,
-            w: box_width,
-            h: box_height,
-            fill: style.background,
-        });
+        let start_page = self.pages.len() - 1;
+        // The background is inserted here once the box's extent is known, so
+        // it is painted behind the children.
+        let start_element = self.page().elements.len();
 
         // Lay out the children within the padded inner region, grouped under a
-        // generic container in the structure tree. The background fill is drawn
-        // above as an artifact and is not part of the group.
+        // generic container in the structure tree. The background fill is an
+        // artifact and not part of the group.
         let (saved_left, saved_right) = (self.left, self.right);
         self.left = box_left + style.padding_x;
         self.right = box_right - style.padding_x;
         self.y = box_top + style.padding_y;
         self.structure.open(StructTag::Div);
-        self.layout_box_blocks(content);
+        let last = self.layout_box_blocks(content);
         self.structure.close();
         self.left = saved_left;
         self.right = saved_right;
 
-        self.y = box_top + box_height + style.margin_y;
+        let end_page = self.pages.len() - 1;
+        let bottom = if end_page == start_page {
+            // Kept on one page: the measured height, which the layout walk
+            // mirrors, keeps the background and pen exactly in sync.
+            box_top + box_height
+        } else {
+            // The pen sits at the last line box's bottom; the padding measures
+            // to the visible text, like `measure_box_blocks`.
+            self.y - last.map_or(0.0, |block| self.leading_below(block)) + style.padding_y
+        };
+
+        let page = &self.theme.page;
+        let (content_top, content_bottom) = (page.content_top(), page.content_bottom());
+        for index in start_page..=end_page {
+            let top = if index == start_page { box_top } else { content_top };
+            let at = if index == start_page { start_element } else { 0 };
+            let segment_bottom = if index == end_page { bottom } else { content_bottom };
+            self.pages[index].elements.insert(
+                at,
+                Element::Rect {
+                    x: box_left,
+                    y: top,
+                    w: box_width,
+                    h: segment_bottom - top,
+                    fill: style.background,
+                },
+            );
+        }
+
+        self.y = bottom + style.margin_y;
     }
 
     /// Lay out a section (a heading plus its following blocks). A section below
     /// the keep-together threshold starts on a fresh page rather than breaking;
-    /// a taller one flows, but the heading plus at least one line of content
+    /// a taller one flows, but the heading plus the start of its first block
     /// must fit or we break first (orphan control).
     ///
     /// Returns the kind of the section's last block, for the caller's spacing.
@@ -384,8 +419,11 @@ impl<'a> Engine<'a> {
             lead_gap + section_height
         } else {
             let heading_height = self.measure_block(&section[0], self.width());
-            let min_follow = self.theme.font_size.body * self.theme.spacing.line_height;
-            lead_gap + heading_height + min_follow
+            let follow = section.get(1).map_or(0.0, |next| {
+                self.gap_before(Some(Kind::Heading(*level)), kind_of(next))
+                    + self.min_start_height(next, self.width())
+            });
+            lead_gap + heading_height + follow
         };
 
         if self.needs_break(need) {
@@ -402,7 +440,7 @@ impl<'a> Engine<'a> {
             self.layout_block(block);
             prev = Some(kind_of(block));
         }
-        prev.unwrap_or(Kind::Heading(*level))
+        prev.expect("a section is never empty")
     }
 
     // --- Measurement (dry-run height, no drawing) ------------------------
@@ -452,10 +490,37 @@ impl<'a> Engine<'a> {
         height.max(0.0)
     }
 
+    /// The smallest height a block claims at the bottom of a page before its
+    /// own page-breaking logic can continue it on the next one: one line for
+    /// flowing text, the first item for lists, the header plus first row (or
+    /// row fragment) for tables, and the whole box for boxes (which are kept
+    /// together when they fit). Used for orphan control under headings.
+    fn min_start_height(&self, block: &Block, width: f32) -> f32 {
+        let line = |size: f32| size * self.theme.spacing.line_height;
+        match block {
+            Block::Heading { level, .. } => line(self.theme.font_size.heading(*level)),
+            Block::Paragraph(_) => line(self.theme.font_size.body),
+            Block::Table(table) => self.table_start_height(table, width),
+            Block::TaskList(items) => items
+                .first()
+                .map_or(0.0, |item| self.task_item_height(item, width)),
+            Block::BulletList(items) | Block::OrderedList { items, .. } => items
+                .first()
+                .map_or(0.0, |item| self.marker_item_height(item, width)),
+            Block::Box { .. } => self.measure_block(block, width),
+            Block::PageBreak => 0.0,
+            Block::Spacer(height) => *height,
+        }
+    }
+
     /// The height a single block would occupy at the given content width.
     fn measure_block(&self, block: &Block, width: f32) -> f32 {
         match block {
             Block::Heading { level, content, .. } => {
+                // Layout skips headings with no visible text.
+                if plain_text(content).trim().is_empty() {
+                    return 0.0;
+                }
                 let size = self.theme.font_size.heading(*level);
                 self.paragraph_height(content, size, true, false, width)
             }

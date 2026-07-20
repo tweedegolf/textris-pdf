@@ -174,6 +174,8 @@ impl Face {
         let mut buffer = UnicodeBuffer::new();
         buffer.push_str(text);
         buffer.guess_segment_properties();
+        // Shaping is left-to-right only (RTL scripts are unsupported); the
+        // forced direction also keeps the cluster arithmetic below valid.
         buffer.set_direction(Direction::LeftToRight);
 
         let output = shaper.shape(buffer, ShapeOptions::new());
@@ -218,8 +220,8 @@ impl Face {
 
 // Vertical metrics: prefer the OS/2 typographic metrics when the
 // USE_TYPO_METRICS flag is set, otherwise hhea, with the OS/2 typographic and
-// Windows metrics as fallbacks for zero hhea values. MVAR deltas apply at
-// non-default variation coordinates.
+// Windows metrics as fallbacks for zero hhea values. Every path applies the
+// matching MVAR delta so pinned variable-font instances get instance metrics.
 
 fn ascender(font: &FontRef, coords: &[NormalizedCoord]) -> i16 {
     let os2 = font.os2().ok();
@@ -237,12 +239,10 @@ fn ascender(font: &FontRef, coords: &[NormalizedCoord]) -> i16 {
     {
         value = os2.s_typo_ascender();
         if value == 0 {
-            value = apply_metric_delta(font, coords, b"hcla", os2.us_win_ascent() as i16);
-        } else {
-            value = apply_metric_delta(font, coords, b"hasc", value);
+            return apply_metric_delta(font, coords, b"hcla", saturate(os2.us_win_ascent()));
         }
     }
-    value
+    apply_metric_delta(font, coords, b"hasc", value)
 }
 
 fn descender(font: &FontRef, coords: &[NormalizedCoord]) -> i16 {
@@ -263,12 +263,15 @@ fn descender(font: &FontRef, coords: &[NormalizedCoord]) -> i16 {
         if value == 0 {
             // usWinDescent is positive-below-baseline; negate to match the
             // hhea sign convention.
-            value = apply_metric_delta(font, coords, b"hcld", -(os2.us_win_descent() as i16));
-        } else {
-            value = apply_metric_delta(font, coords, b"hdsc", value);
+            return apply_metric_delta(font, coords, b"hcld", -saturate(os2.us_win_descent()));
         }
     }
-    value
+    apply_metric_delta(font, coords, b"hdsc", value)
+}
+
+/// Clamp a u16 Windows metric into i16 range instead of wrapping.
+fn saturate(value: u16) -> i16 {
+    i16::try_from(value).unwrap_or(i16::MAX)
 }
 
 fn capital_height(font: &FontRef, coords: &[NormalizedCoord]) -> Option<i16> {

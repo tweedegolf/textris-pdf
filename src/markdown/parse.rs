@@ -19,7 +19,9 @@
 //!
 //! GitHub-flavored Markdown, restricted to what the [`Block`]/[`Inline`] model
 //! can express, plus an optional front-matter block and two block extensions:
-//! *attribute lines* and *directives*. The exporter's output is valid input.
+//! *attribute lines* and *directives*. The exporter's body output is valid
+//! input; only the `---` rule it appends for a document footer is not (the
+//! dialect authors chrome as [front matter](#front-matter) instead).
 //!
 //! ## Front matter
 //!
@@ -1363,17 +1365,18 @@ fn no_attrs(attrs: Option<Attrs>, what: &str) -> Result<()> {
     }
 }
 
-/// Unwrap a front-matter value: the inner text of a double-quoted string, or a
-/// bare (unquoted) token as-is. The inner text still carries backslash escapes
-/// for the inline parser to resolve.
+/// Unwrap a front-matter value: the inner text of a double-quoted string. The
+/// inner text still carries backslash escapes for the inline parser to resolve.
 fn front_matter_value(raw: &str, line: usize) -> Result<String> {
-    if let Some(inner) = raw.strip_prefix('"') {
-        match inner.strip_suffix('"') {
-            Some(inner) => Ok(inner.to_string()),
-            None => err(line, "unterminated string in front matter"),
-        }
-    } else {
-        Ok(raw.to_string())
+    let Some(inner) = raw.strip_prefix('"') else {
+        return err(
+            line,
+            format!("front matter values must be double-quoted strings, e.g. `\"{raw}\"`"),
+        );
+    };
+    match inner.strip_suffix('"') {
+        Some(inner) => Ok(inner.to_string()),
+        None => err(line, "unterminated string in front matter"),
     }
 }
 
@@ -2258,6 +2261,11 @@ Body.
             unterminated("+++\ntitle = \"x\n+++\n\n# B\n")
                 .message
                 .contains("unterminated string")
+        );
+        assert!(
+            unterminated("+++\nlanguage = en\n+++\n\n# B\n")
+                .message
+                .contains("double-quoted")
         );
     }
 

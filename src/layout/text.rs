@@ -197,7 +197,9 @@ impl Engine<'_> {
     }
 
     /// Shape each whitespace-separated word of the inlines into a [`Word`].
-    /// Newlines become hard-break markers, honored by [`wrap`](Self::wrap).
+    /// Newlines become hard-break markers, honored by [`wrap`](Self::wrap);
+    /// all other breaking whitespace (tabs, `\r`, …) separates words like a
+    /// space. Non-breaking spaces stay inside their word.
     pub(super) fn tokenize(
         &self,
         inlines: &[Inline],
@@ -205,6 +207,9 @@ impl Engine<'_> {
         base_italic: bool,
         size: f32,
     ) -> Vec<Word> {
+        fn breaks_words(c: char) -> bool {
+            c.is_whitespace() && !matches!(c, '\u{A0}' | '\u{202F}' | '\u{2007}')
+        }
         let mut words = Vec::new();
         for inline in inlines {
             let style = inline.resolve_style(base_bold, base_italic);
@@ -218,7 +223,7 @@ impl Engine<'_> {
                 if index > 0 {
                     words.push(Word::marker(WordKind::HardBreak, None, 0.0));
                 }
-                for token in segment.split(' ') {
+                for token in segment.split(breaks_words) {
                     if token.is_empty() {
                         continue;
                     }

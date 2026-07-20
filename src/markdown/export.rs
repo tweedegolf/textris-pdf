@@ -105,8 +105,10 @@ fn render_footer(footer: &Chrome) -> Option<String> {
 /// pages to count without pagination, so it yields `None` and is dropped.
 fn section_text(content: &SectionContent) -> Option<String> {
     match content {
-        SectionContent::Text(text) => Some(escape_punctuation(text)),
-        SectionContent::Spans(spans) => Some(render_inlines(spans, InlineContext::Flow)),
+        SectionContent::Text(text) => Some(hard_breaks(&escape_punctuation(text))),
+        SectionContent::Spans(spans) => {
+            Some(hard_breaks(&render_inlines(spans, InlineContext::Flow)))
+        }
         SectionContent::PageCounter(_) => None,
     }
 }
@@ -463,6 +465,14 @@ mod tests {
         let md = doc.to_markdown();
         assert!(md.ends_with("---\n\nRevision\\: `3`\n"), "{md}");
         assert!(!md.contains("Page"), "page counter should be dropped: {md}");
+    }
+
+    #[test]
+    fn footer_hard_breaks_become_markdown_hard_breaks() {
+        let mut doc = Textris::new();
+        doc.paragraph("Body.");
+        doc.footer_left(text("one").line_break().normal("two"));
+        assert!(doc.to_markdown().ends_with("---\n\none  \ntwo\n"));
     }
 
     #[test]

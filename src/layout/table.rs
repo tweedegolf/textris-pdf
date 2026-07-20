@@ -72,6 +72,37 @@ impl Engine<'_> {
         }
     }
 
+    /// The height the start of a table needs before its row-level page
+    /// breaking takes over: the header row (when shown) plus the first body
+    /// row, or that row's smallest fragment when the row will split across
+    /// pages anyway. Used for orphan control, here and in
+    /// [`min_start_height`](Self::min_start_height).
+    pub(super) fn table_start_height(&self, table: &Table, width: f32) -> f32 {
+        let columns = table.columns();
+        if columns == 0 {
+            return 0.0;
+        }
+        let widths = self.column_widths(table, columns, width);
+        let style = &table.style;
+        let header_height = table.has_header().then(|| {
+            self.row_height(&table.headers, &widths, columns, &self.header_row_style(style))
+        });
+        let first_row = table.rows.first().map_or(0.0, |row| {
+            self.row_height(row, &widths, columns, &self.body_row_style(style, None))
+        });
+        let page_capacity = self.theme.page.content_bottom()
+            - self.theme.page.content_top()
+            - header_height.unwrap_or(0.0);
+        let min_fragment = self.table_font_size(style) * self.theme.spacing.line_height
+            + 2.0 * self.theme.table.inset_y;
+        let first_keep = if first_row > page_capacity {
+            min_fragment
+        } else {
+            first_row
+        };
+        header_height.unwrap_or(0.0) + first_keep
+    }
+
     /// The height the whole table would occupy at the given content width.
     pub(super) fn table_height(&self, table: &Table, width: f32) -> f32 {
         let columns = table.columns();
@@ -132,18 +163,9 @@ impl Engine<'_> {
         // is redrawn as an artifact so assistive tech reads it only once.
         if let Some(header_height) = header_height {
             // Orphan control: keep the header together with the first body row
-            // — or, when that row will split anyway, with its first fragment —
-            // so a table starting at the bottom of a page breaks *before* its
-            // header instead of stranding it (or overflowing the margin).
-            let first_row_height = table.rows.first().map_or(0.0, |row| {
-                self.row_height(row, &widths, columns, &self.body_row_style(style, None))
-            });
-            let first_keep = if first_row_height > page_capacity {
-                min_fragment
-            } else {
-                first_row_height
-            };
-            self.ensure(header_height + first_keep);
+            // (or its first fragment) so a table starting at the bottom of a
+            // page breaks *before* its header instead of stranding it.
+            self.ensure(self.table_start_height(table, self.width()));
             let tags = self.push_row_structure(Some(TableHeaderScope::Column), columns);
             self.emit_row(
                 &table.headers,
@@ -265,7 +287,8 @@ impl Engine<'_> {
                 let min_total: f32 = min.iter().sum();
 
                 if max_total <= 0.0 {
-                    // Empty table: fall back to an equal split.
+                    // Every column measures zero, possible only with zero cell
+                    // insets: an equal split avoids dividing by zero below.
                     return vec![total / columns as f32; columns];
                 }
 
@@ -372,7 +395,10 @@ impl Engine<'_> {
             }
             natural = natural.max(line_width);
         };
-        if let Some(cell) = table.headers.get(column) {
+        // Only a rendered header row participates in column sizing.
+        if table.has_header()
+            && let Some(cell) = table.headers.get(column)
+        {
             consider(cell, table.style.header_italic);
         }
         for row in &table.rows {

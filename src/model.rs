@@ -69,7 +69,7 @@ impl Document {
     /// `prefix_headings` controls whether section numbers are also prefixed
     /// onto the headings themselves.
     fn resolve_sections_impl(&mut self, prefix_headings: bool, ref_style: RefStyle) {
-        let mut counters = [0usize; 6];
+        let mut counters = [0usize; 7];
         let mut refs = HashMap::new();
         number_headings(
             &mut self.blocks,
@@ -107,7 +107,7 @@ enum RefStyle {
 /// when `prefix` is set, prefixing the number to the heading text.
 fn number_headings(
     blocks: &mut [Block],
-    counters: &mut [usize; 6],
+    counters: &mut [usize; 7],
     refs: &mut HashMap<String, String>,
     prefix: bool,
     ref_style: RefStyle,
@@ -120,7 +120,7 @@ fn number_headings(
                 numbered,
                 label,
             } if *numbered => {
-                let level = (*level).clamp(1, 5) as usize;
+                let level = (*level).clamp(1, 6) as usize;
                 counters[level] += 1;
                 for deeper in counters[level + 1..].iter_mut() {
                     *deeper = 0;
@@ -576,6 +576,7 @@ mod tests {
                 heading(4, "Terms", true, None),
                 heading(3, "Body", true, None),
                 heading(4, "Detail", true, None),
+                heading(6, "Deep", true, None),
                 heading(3, "Plain", false, None),
             ],
             ..Document::default()
@@ -598,6 +599,7 @@ mod tests {
                 "1.2. Terms",
                 "2. Body",
                 "2.1. Detail",
+                "2.1.1. Deep",
                 "Plain"
             ]
         );

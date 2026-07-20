@@ -5,3 +5,5 @@ tests/*.docx
 tests/*.md
 # The Markdown-dialect input fixture is a source file, not generated output.
 !tests/mantis-shrimp-example-input.md
+
+Cargo.lock

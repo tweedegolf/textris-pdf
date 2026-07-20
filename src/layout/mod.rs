@@ -381,9 +381,21 @@ impl<'a> Engine<'a> {
         let page = &self.theme.page;
         let (content_top, content_bottom) = (page.content_top(), page.content_bottom());
         for index in start_page..=end_page {
-            let top = if index == start_page { box_top } else { content_top };
-            let at = if index == start_page { start_element } else { 0 };
-            let segment_bottom = if index == end_page { bottom } else { content_bottom };
+            let top = if index == start_page {
+                box_top
+            } else {
+                content_top
+            };
+            let at = if index == start_page {
+                start_element
+            } else {
+                0
+            };
+            let segment_bottom = if index == end_page {
+                bottom
+            } else {
+                content_bottom
+            };
             self.pages[index].elements.insert(
                 at,
                 Element::Rect {

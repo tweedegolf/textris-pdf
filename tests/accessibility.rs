@@ -133,6 +133,24 @@ fn an_invalid_page_size_is_an_error_not_a_panic() {
 }
 
 #[test]
+fn stressed_tables_still_render_accessibly() {
+    let fonts = load_fonts();
+    let mut doc = Textris::new();
+    doc.title("Table stress");
+    // A header row taller than a page: split across pages, not repeated.
+    doc.table([format!("heading {}", "word ".repeat(1500))], [["body"]]);
+    // Many narrow columns on one page.
+    doc.table(
+        (0..40).map(|c| format!("h{c}")),
+        [(0..40).map(|c| format!("v{c}"))],
+    );
+    let pdf = doc
+        .render(&fonts)
+        .expect("stressed tables should still validate as PDF/A-2A + PDF/UA-1");
+    assert!(contains(&pdf, "StructTreeRoot"));
+}
+
+#[test]
 fn a_document_without_headings_still_renders_accessibly() {
     let fonts = load_fonts();
     let mut doc = Textris::new();

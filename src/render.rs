@@ -386,7 +386,13 @@ fn draw_spans(
             .unwrap_or(text_color);
         surface.start_tagged(ContentTag::Artifact(Artifact::with_kind(artifact)));
         if let Some(width) = span.fill_in {
-            draw_stroke(surface, &[(x, baseline), (x + width, baseline)], 0.7, color, false);
+            draw_stroke(
+                surface,
+                &[(x, baseline), (x + width, baseline)],
+                0.7,
+                color,
+                false,
+            );
             x += width;
         } else {
             let text = chrome_text(&span.text);

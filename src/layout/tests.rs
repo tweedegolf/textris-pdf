@@ -1,5 +1,9 @@
 use super::*;
-use crate::{build::Textris, fonts::test_fonts, theme::Theme};
+use crate::{
+    build::{Textris, cell},
+    fonts::test_fonts,
+    theme::{ColumnWidth, ColumnWidths, TableStyle, Theme},
+};
 
 fn texts(page: &Page) -> Vec<&TextElement> {
     page.elements
@@ -566,6 +570,244 @@ fn page_of(pages: &[Page], needle: &str, size: f32) -> Option<usize> {
             .iter()
             .any(|t| (t.size - size).abs() < 0.01 && t.text.split(' ').any(|word| word == needle))
     })
+}
+
+// --- Table stress -----------------------------------------------------------
+
+/// Every text element on every page stays on the physical page horizontally
+/// and inside the content box vertically.
+fn assert_text_in_bounds(pages: &[Page], theme: &Theme, fonts: &Fonts) {
+    for (index, page) in pages.iter().enumerate() {
+        for text in texts(page) {
+            assert!(
+                text.x >= 0.0,
+                "page {index}: text starts left of the page: x={} ({:?})",
+                text.x,
+                text.text
+            );
+            let right = text.x + fonts.measure(text.style, &text.text, text.size);
+            assert!(
+                right <= theme.page.width + 0.01,
+                "page {index}: text ends past the page edge: {right} ({:?})",
+                text.text
+            );
+            assert!(
+                text.baseline >= theme.page.content_top() - 0.01,
+                "page {index}: text above the content box: {} ({:?})",
+                text.baseline,
+                text.text
+            );
+            assert!(
+                text.baseline <= theme.page.content_bottom() + 0.01,
+                "page {index}: text below the content box: {} ({:?})",
+                text.baseline,
+                text.text
+            );
+        }
+    }
+}
+
+#[test]
+fn table_with_many_columns_stays_on_the_page() {
+    let fonts = test_fonts();
+    let theme = Theme::default();
+    let mut doc = Textris::new();
+    let headers: Vec<String> = (0..60).map(|c| format!("h{c}")).collect();
+    let row: Vec<String> = (0..60).map(|c| format!("value{c}")).collect();
+    doc.table(headers, [row.clone(), row]);
+    let pages = layout(&doc.build(), &fonts);
+    assert_text_in_bounds(&pages, &theme, &fonts);
+}
+
+#[test]
+fn table_with_hundreds_of_columns_terminates_with_positive_widths() {
+    let fonts = test_fonts();
+    let theme = Theme::default();
+    let engine = Engine::new(&fonts, &theme);
+    let table = crate::model::Table {
+        style: TableStyle::data(),
+        headers: (0..300).map(|c| cell(format!("{c}"))).collect(),
+        rows: vec![(0..300).map(|_| cell("x")).collect()],
+    };
+    let widths = engine.column_widths(&table, 300, theme.page.content_width());
+    assert_eq!(widths.len(), 300);
+    assert!(widths.iter().all(|w| w.is_finite() && *w > 0.0));
+    assert!(widths.iter().sum::<f32>() <= theme.page.content_width() + 0.1);
+
+    let mut doc = Textris::new();
+    doc.push_block(Block::Table(table));
+    let pages = layout(&doc.build(), &fonts);
+    assert_text_in_bounds(&pages, &theme, &fonts);
+}
+
+#[test]
+fn huge_fraction_widths_do_not_overflow() {
+    let fonts = test_fonts();
+    let theme = Theme::default();
+    let engine = Engine::new(&fonts, &theme);
+    let table = crate::model::Table {
+        style: TableStyle {
+            columns: ColumnWidths::custom([
+                ColumnWidth::Fraction(u32::MAX),
+                ColumnWidth::Fraction(u32::MAX),
+                ColumnWidth::Fraction(2),
+            ]),
+            ..TableStyle::data()
+        },
+        headers: vec![cell("a"), cell("b"), cell("c")],
+        rows: vec![vec![cell("1"), cell("2"), cell("3")]],
+    };
+    let widths = engine.column_widths(&table, 3, theme.page.content_width());
+    assert!(
+        widths.iter().all(|w| w.is_finite() && *w >= 0.0),
+        "{widths:?}"
+    );
+}
+
+#[test]
+fn pathological_custom_widths_are_sanitized() {
+    let fonts = test_fonts();
+    let theme = Theme::default();
+    let engine = Engine::new(&fonts, &theme);
+    let table = crate::model::Table {
+        style: TableStyle {
+            columns: ColumnWidths::custom([
+                ColumnWidth::Absolute(f32::NAN),
+                ColumnWidth::Absolute(-100.0),
+                ColumnWidth::Absolute(f32::INFINITY),
+                ColumnWidth::Fraction(0),
+            ]),
+            ..TableStyle::data()
+        },
+        headers: vec![cell("a"), cell("b"), cell("c"), cell("d")],
+        rows: vec![vec![cell("1"), cell("2"), cell("3"), cell("4")]],
+    };
+    let total = theme.page.content_width();
+    let widths = engine.column_widths(&table, 4, total);
+    assert!(
+        widths.iter().all(|w| w.is_finite() && *w >= 0.0),
+        "{widths:?}"
+    );
+    assert!(widths.iter().sum::<f32>() <= total + 0.1, "{widths:?}");
+}
+
+#[test]
+fn absolute_widths_wider_than_the_page_scale_down() {
+    let fonts = test_fonts();
+    let theme = Theme::default();
+    let mut doc = Textris::new();
+    let style = TableStyle {
+        columns: ColumnWidths::custom([ColumnWidth::Absolute(600.0), ColumnWidth::Absolute(600.0)]),
+        ..TableStyle::data()
+    };
+    doc.table_styled(&style, ["left", "right"], [["one", "two"]]);
+    let pages = layout(&doc.build(), &fonts);
+    assert_text_in_bounds(&pages, &theme, &fonts);
+}
+
+#[test]
+fn header_row_taller_than_a_page_is_split_not_overflowed() {
+    let fonts = test_fonts();
+    let theme = Theme::default();
+    let mut doc = Textris::new();
+    doc.table(
+        [format!("heading {}", "word ".repeat(1500))],
+        [["body row"]],
+    );
+    let pages = layout(&doc.build(), &fonts);
+    assert!(pages.len() >= 2, "the header should span pages");
+    assert_text_in_bounds(&pages, &theme, &fonts);
+    // The body row still lands after the split header.
+    assert!(
+        pages
+            .iter()
+            .flat_map(|p| texts(p))
+            .any(|t| t.text.contains("body")),
+        "the body row went missing"
+    );
+}
+
+#[test]
+fn spacer_cell_taller_than_a_page_spans_pages() {
+    use crate::build::spacer;
+    let fonts = test_fonts();
+    let theme = Theme::default();
+    let mut doc = Textris::new();
+    doc.table_with(|t| {
+        t.row([cell("notes"), spacer(2500.0)]);
+    });
+    doc.paragraph("afterwards");
+    let pages = layout(&doc.build(), &fonts);
+    assert!(pages.len() >= 3, "the spacer should consume pages");
+    assert_text_in_bounds(&pages, &theme, &fonts);
+}
+
+#[test]
+fn huge_row_min_height_spans_pages() {
+    let fonts = test_fonts();
+    let theme = Theme::default();
+    let style = TableStyle {
+        row_min_height: Some(5000.0),
+        ..TableStyle::data()
+    };
+    let mut doc = Textris::new();
+    doc.table_styled(&style, ["a"], [["x"]]);
+    let pages = layout(&doc.build(), &fonts);
+    assert!(pages.len() >= 3);
+    assert_text_in_bounds(&pages, &theme, &fonts);
+}
+
+#[test]
+fn unbreakable_word_in_a_cell_wraps_and_paginates() {
+    let fonts = test_fonts();
+    let theme = Theme::default();
+    let mut doc = Textris::new();
+    doc.table(
+        ["a", "b", "c"],
+        [["x".repeat(4000), "short".to_string(), "short".to_string()]],
+    );
+    let pages = layout(&doc.build(), &fonts);
+    assert_text_in_bounds(&pages, &theme, &fonts);
+}
+
+#[test]
+fn long_table_repeats_its_header_on_every_page() {
+    let fonts = test_fonts();
+    let theme = Theme::default();
+    let mut doc = Textris::new();
+    doc.table_with(|t| {
+        t.headers(["name", "value"]);
+        for i in 0..200 {
+            t.row([format!("row{i}"), "x".to_string()]);
+        }
+    });
+    let pages = layout(&doc.build(), &fonts);
+    assert!(pages.len() >= 3);
+    assert_text_in_bounds(&pages, &theme, &fonts);
+    for (index, page) in pages.iter().enumerate() {
+        assert!(
+            texts(page).iter().any(|t| t.text == "name"),
+            "page {index} is missing the repeated header"
+        );
+    }
+}
+
+#[test]
+fn tall_table_inside_a_box_flows_with_backgrounds() {
+    let fonts = test_fonts();
+    let theme = Theme::default();
+    let mut doc = Textris::new();
+    doc.boxed(|b| {
+        b.table_with(|t| {
+            t.headers(["name", "value"]);
+            for i in 0..120 {
+                t.row([format!("row{i}"), "x".to_string()]);
+            }
+        });
+    });
+    let pages = layout(&doc.build(), &fonts);
+    assert!(pages.len() >= 2, "the boxed table should span pages");
+    assert_text_in_bounds(&pages, &theme, &fonts);
 }
 
 #[test]

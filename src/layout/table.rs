@@ -1,7 +1,8 @@
 //! Table layout: column sizing (auto, label and custom models), row heights,
 //! page-breaking with repeated headers, and row emission. A row that fits a
 //! page but not the space left breaks to the next page as a whole; a row (or
-//! cell) taller than a page splits and continues across pages.
+//! cell) taller than a page splits and continues across pages. That includes
+//! the header row, which then does not repeat on continuation pages.
 
 use krilla::{color::rgb, tagging::TableHeaderScope};
 
@@ -85,7 +86,12 @@ impl Engine<'_> {
         let widths = self.column_widths(table, columns, width);
         let style = &table.style;
         let header_height = table.has_header().then(|| {
-            self.row_height(&table.headers, &widths, columns, &self.header_row_style(style))
+            self.row_height(
+                &table.headers,
+                &widths,
+                columns,
+                &self.header_row_style(style),
+            )
         });
         let first_row = table.rows.first().map_or(0.0, |row| {
             self.row_height(row, &widths, columns, &self.body_row_style(style, None))
@@ -134,24 +140,28 @@ impl Engine<'_> {
 
         let header_style = self.header_row_style(style);
 
-        // Reused every time the header row repeats after a page break.
+        // Reused every time the header row repeats after a page break. A
+        // header taller than the page can neither fit anywhere nor repeat:
+        // it splits across pages like an over-tall body row.
+        let page_height = self.theme.page.content_bottom() - self.theme.page.content_top();
         let header_height = table
             .has_header()
             .then(|| self.row_height(&table.headers, &widths, columns, &header_style));
+        let header_splits = header_height.is_some_and(|height| height > page_height);
         let repeat_header_tags = vec![Tagging::Artifact; columns];
-        let repeat_header = header_height.map(|height| HeaderRepeat {
-            cells: &table.headers,
-            style: &header_style,
-            height,
-            tags: &repeat_header_tags,
-        });
+        let repeat_header = header_height
+            .filter(|_| !header_splits)
+            .map(|height| HeaderRepeat {
+                cells: &table.headers,
+                style: &header_style,
+                height,
+                tags: &repeat_header_tags,
+            });
 
         // A row taller than this cannot fit any page (a fresh page still
         // carries the repeated header) and is split across pages instead of
         // broken to the next one.
-        let page_capacity = self.theme.page.content_bottom()
-            - self.theme.page.content_top()
-            - header_height.unwrap_or(0.0);
+        let page_capacity = page_height - header_height.filter(|_| !header_splits).unwrap_or(0.0);
         // The smallest useful fragment of a split row: one line plus insets.
         let min_fragment = self.table_font_size(style) * self.theme.spacing.line_height
             + 2.0 * self.theme.table.inset_y;
@@ -167,15 +177,27 @@ impl Engine<'_> {
             // page breaks *before* its header instead of stranding it.
             self.ensure(self.table_start_height(table, self.width()));
             let tags = self.push_row_structure(Some(TableHeaderScope::Column), columns);
-            self.emit_row(
-                &table.headers,
-                &xs,
-                &widths,
-                columns,
-                &header_style,
-                header_height,
-                &tags,
-            );
+            if header_splits {
+                self.emit_split_row(
+                    &table.headers,
+                    &xs,
+                    &widths,
+                    columns,
+                    &header_style,
+                    &tags,
+                    None,
+                );
+            } else {
+                self.emit_row(
+                    &table.headers,
+                    &xs,
+                    &widths,
+                    columns,
+                    &header_style,
+                    header_height,
+                    &tags,
+                );
+            }
         }
 
         for (index, row) in table.rows.iter().enumerate() {
@@ -335,19 +357,22 @@ impl Engine<'_> {
                 // columns then split the leftover by weight.
                 let mut widths = vec![0.0_f32; columns];
                 let mut used = 0.0;
-                let mut frac_total = 0_u32;
+                let mut frac_total = 0_u64;
                 for c in 0..columns {
                     match spec(c) {
-                        ColumnWidth::Absolute(w) => {
+                        // A negative absolute width clamps to zero; a
+                        // non-finite one falls back to the auto width.
+                        ColumnWidth::Absolute(w) if w.is_finite() => {
+                            let w = w.max(0.0);
                             widths[c] = w;
                             used += w;
                         }
-                        ColumnWidth::Auto => {
+                        ColumnWidth::Absolute(_) | ColumnWidth::Auto => {
                             let w = (metrics[c].1 + pad).max(min[c]);
                             widths[c] = w;
                             used += w;
                         }
-                        ColumnWidth::Fraction(n) => frac_total += n,
+                        ColumnWidth::Fraction(n) => frac_total += u64::from(n),
                     }
                 }
 
@@ -355,11 +380,21 @@ impl Engine<'_> {
                 for c in 0..columns {
                     if let ColumnWidth::Fraction(n) = spec(c) {
                         let share = if frac_total > 0 {
-                            leftover * n as f32 / frac_total as f32
+                            leftover * (f64::from(n) / frac_total as f64) as f32
                         } else {
                             0.0
                         };
                         widths[c] = share.max(min[c]);
+                    }
+                }
+
+                // Absolute and minimum widths may claim more than the page;
+                // scale everything down proportionally so the table never
+                // overflows horizontally.
+                let used: f32 = widths.iter().sum();
+                if used > total && used > 0.0 {
+                    for width in &mut widths {
+                        *width *= total / used;
                     }
                 }
 

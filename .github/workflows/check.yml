@@ -37,3 +37,48 @@ jobs:
 
       - name: Test
         run: cargo test --all-features
+
+  # Tag and release the version in Cargo.toml, once the checks above are green.
+  # Bumping `version` in Cargo.toml on main is the whole release ritual: this
+  # job then creates `v<version>`.
+  release:
+    needs: check
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: release
+      cancel-in-progress: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Release the version in Cargo.toml, if it has no release yet
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # The first line-anchored `version` in the manifest is the package's;
+          # dependency versions sit inside inline tables, never at line start.
+          version="$(awk -F'"' '/^version = "/ { print $2; exit }' Cargo.toml)"
+          if [ -z "$version" ]; then
+            echo "::error file=Cargo.toml::no package version found"
+            exit 1
+          fi
+          tag="v$version"
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "Release $tag already exists; nothing to do." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # Creates the tag at this commit as well, unless it already exists.
+          gh release create "$tag" \
+            --target "$GITHUB_SHA" \
+            --title "$tag" \
+            --generate-notes
+          echo "Released $tag." >> "$GITHUB_STEP_SUMMARY"

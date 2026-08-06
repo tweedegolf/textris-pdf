@@ -73,20 +73,22 @@ fn content_overflowing_a_page_starts_a_new_one() {
     );
 }
 
-#[test]
-fn table_cell_text_is_vertically_centered_on_its_cap_band() {
-    use crate::fonts::Style;
+/// Lay out a table whose single body row is much taller than its one line of
+/// text, so the row's vertical alignment is visible. Returns the row's extent
+/// (from its stripe rectangle) and the cell's baseline.
+fn tall_row_metrics(valign: crate::theme::VerticalAlign) -> ((f32, f32), f32) {
     let fonts = test_fonts();
-    let theme = Theme::default();
-    let size = theme.font_size.body;
-
-    // A single striped body row whose cell mixes caps, ascenders and descenders.
+    let style = TableStyle {
+        row_min_height: Some(60.0),
+        valign,
+        ..TableStyle::data()
+    };
+    // The cell mixes caps, ascenders and descenders.
     let mut doc = Textris::new();
-    doc.table(["H"], [["Agpy"]]);
+    doc.table_styled(&style, ["H"], [["Agpy"]]);
     let pages = layout(&doc.build(), &fonts);
 
-    // The striped body row's rectangle gives the row's vertical extent.
-    let (top, height) = pages[0]
+    let extent = pages[0]
         .elements
         .iter()
         .find_map(|e| match e {
@@ -94,22 +96,67 @@ fn table_cell_text_is_vertically_centered_on_its_cap_band() {
             _ => None,
         })
         .expect("striped body row");
-
-    // The body cell's baseline.
     let baseline = texts(&pages[0])
         .into_iter()
         .find(|t| t.text == "Agpy")
         .expect("body cell text")
         .baseline;
+    (extent, baseline)
+}
+
+#[test]
+fn table_cell_text_is_top_aligned_by_default() {
+    use crate::{fonts::Style, theme::VerticalAlign};
+    let fonts = test_fonts();
+    let theme = Theme::default();
+
+    assert_eq!(TableStyle::data().valign, VerticalAlign::Top);
+    let ((top, _), baseline) = tall_row_metrics(VerticalAlign::Top);
+
+    // The line box starts at the top inset, so the tallest ascender still
+    // clears the cell padding.
+    let expected = top + theme.table.inset_y + fonts.ascent(Style::Regular, theme.font_size.body);
+    assert!(
+        (baseline - expected).abs() < 0.01,
+        "baseline ({baseline}) should sit one ascent below the top inset ({expected})"
+    );
+}
+
+#[test]
+fn table_valign_middle_centers_cell_text_on_its_cap_band() {
+    use crate::{fonts::Style, theme::VerticalAlign};
+    let fonts = test_fonts();
+    let theme = Theme::default();
+
+    let ((top, height), baseline) = tall_row_metrics(VerticalAlign::Middle);
 
     // The cap-height band (cap top -> baseline) is centered in the row, so the
     // text is optically centered rather than riding high in the cell.
-    let cap = fonts.cap_height(Style::Regular, size);
+    let cap = fonts.cap_height(Style::Regular, theme.font_size.body);
     let cap_center = baseline - cap / 2.0;
     let row_center = top + height / 2.0;
     assert!(
         (cap_center - row_center).abs() < 0.01,
         "cap band center ({cap_center}) should sit at the row center ({row_center})"
+    );
+}
+
+#[test]
+fn table_valign_bottom_aligns_cell_text_to_the_bottom_inset() {
+    use crate::{fonts::Style, theme::VerticalAlign};
+    let fonts = test_fonts();
+    let theme = Theme::default();
+    let size = theme.font_size.body;
+
+    let ((top, height), baseline) = tall_row_metrics(VerticalAlign::Bottom);
+
+    // The line box ends at the bottom inset, so the deepest descender still
+    // clears the cell padding.
+    let line_h = size * theme.spacing.line_height;
+    let expected = top + height - theme.table.inset_y - line_h + fonts.ascent(Style::Regular, size);
+    assert!(
+        (baseline - expected).abs() < 0.01,
+        "baseline ({baseline}) should sit one line box above the bottom inset ({expected})"
     );
 }
 

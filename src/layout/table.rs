@@ -13,7 +13,7 @@ use crate::{
         text::{Word, WordKind},
     },
     model::{Cell, Table},
-    theme::{Align, ColumnWidth, ColumnWidths, TableStyle},
+    theme::{Align, ColumnWidth, ColumnWidths, TableStyle, VerticalAlign},
 };
 
 /// Styling for one table row, resolved from the table's [`TableStyle`] and the
@@ -23,6 +23,7 @@ pub(super) struct RowStyle<'a> {
     fill: Option<rgb::Color>,
     flush_first_column: bool,
     align: &'a [Align],
+    valign: VerticalAlign,
     size: f32,
     row_min_height: f32,
 }
@@ -57,6 +58,7 @@ impl Engine<'_> {
             fill: None,
             flush_first_column: style.flush_first_column,
             align: &style.align,
+            valign: style.valign,
             size: self.table_font_size(style),
             row_min_height: style
                 .row_min_height
@@ -526,15 +528,7 @@ impl Engine<'_> {
             let avail = self.cell_available_width(widths[c], c, style);
             let words = self.tokenize(cell, false, style.italic, body);
             let lines = self.wrap(words, avail, body);
-            // Vertically center the visible text body within the row. The
-            // reference is the cap-height→baseline band (as Typst does), not the
-            // full em box with its leading, so short cells sit optically centered
-            // instead of riding high. For multi-line cells the band spans the
-            // first line's cap top to the last line's baseline.
-            let cap = self.fonts.cap_height(Style::Regular, body);
-            let block_h = cap + (lines.len() as f32 - 1.0) * line_h;
-            let first_baseline = top + (height - block_h) / 2.0 + cap;
-            let mut top_of_text = first_baseline - self.fonts.ascent(Style::Regular, body);
+            let mut top_of_text = self.cell_text_top(top, height, lines.len(), style);
             for line in &lines {
                 let x = self.line_x(line, c, xs, widths, style);
                 self.draw_line(line, x, top_of_text, body, text_color);
@@ -547,10 +541,11 @@ impl Engine<'_> {
 
     /// Draw a row (or row fragment) that is too tall for any single page by
     /// splitting it into page-sized pieces: every cell's wrapped lines continue
-    /// top-aligned across pages (repeating the table header, when there is
-    /// one), each fragment carries the row's fill and insets, and a fill-in
-    /// line lands on the final fragment. Spacer heights beyond the last text
-    /// line keep consuming pages until they are used up.
+    /// across pages top-aligned within each fragment, whatever the row's
+    /// [`VerticalAlign`] (its content fills the fragment anyway), repeating the
+    /// table header when there is one. Each fragment carries the row's fill and
+    /// insets, and a fill-in line lands on the final fragment. Spacer heights
+    /// beyond the last text line keep consuming pages until they are used up.
     #[allow(clippy::too_many_arguments)]
     fn emit_split_row(
         &mut self,
@@ -678,6 +673,33 @@ impl Engine<'_> {
             color: self.theme.palette.text,
             closed: false,
         });
+    }
+
+    /// The y of a cell's first line box, placing its `lines` wrapped lines
+    /// according to the row's vertical alignment. `top` and `height` are the
+    /// row's extent.
+    ///
+    /// Top and bottom alignment measure the text's line boxes against the cell
+    /// insets, so even the tallest ascender or deepest descender clears the
+    /// padding. Middle alignment instead centers the visible text body: the
+    /// reference is the cap-height→baseline band (as Typst does), not the full
+    /// em box with its leading, so short cells sit optically centered instead of
+    /// riding high. For multi-line cells that band spans the first line's cap
+    /// top to the last line's baseline.
+    fn cell_text_top(&self, top: f32, height: f32, lines: usize, style: &RowStyle) -> f32 {
+        let body = style.size;
+        let line_h = body * self.theme.spacing.line_height;
+        let inset_y = self.theme.table.inset_y;
+        match style.valign {
+            VerticalAlign::Top => top + inset_y,
+            VerticalAlign::Middle => {
+                let cap = self.fonts.cap_height(Style::Regular, body);
+                let band = cap + (lines as f32 - 1.0) * line_h;
+                let first_baseline = top + (height - band) / 2.0 + cap;
+                first_baseline - self.fonts.ascent(Style::Regular, body)
+            }
+            VerticalAlign::Bottom => top + height - inset_y - lines as f32 * line_h,
+        }
     }
 
     /// The x where one line of column `c` starts, honoring the column's

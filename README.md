@@ -298,14 +298,15 @@ let mut doc = Textris::with_theme(theme);
 ```
 
 Tables are styled per-table. A [`TableStyle`](src/theme/style.rs) bundles the choices
-for one table (header row, italics, striping, column sizing and alignment, flush
+for one table (header row, italics, striping, column sizing, horizontal and
+vertical alignment, flush
 label column, fill-in blanks). Define your styles up front and reference one when
 adding a table; `TableStyle::data()` and `TableStyle::label()` are the built-in
 presets:
 
 ```rust
 use textris_pdf::build::{Textris, text};
-use textris_pdf::theme::{Align, TableStyle};
+use textris_pdf::theme::{Align, TableStyle, VerticalAlign};
 
 // A data table without zebra striping.
 let plain = TableStyle { striped: false, ..TableStyle::data() };
@@ -316,6 +317,10 @@ let amounts = TableStyle {
     align: vec![Align::Left, Align::Right],
     ..TableStyle::data()
 };
+
+// Cell content sits at the top of its row by default; `valign` centers it (or
+// pushes it to the bottom) in rows taller than their content.
+let centered = TableStyle { valign: VerticalAlign::Middle, ..TableStyle::data() };
 
 let mut doc = Textris::new();
 doc.table_styled(&plain, ["a", "b"], [[text("1"), text("2")]]); // referenced style

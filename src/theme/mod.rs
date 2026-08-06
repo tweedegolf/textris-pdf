@@ -12,7 +12,7 @@
 
 mod style;
 
-pub use style::{Align, BoxStyle, ColumnWidth, ColumnWidths, TableStyle};
+pub use style::{Align, BoxStyle, ColumnWidth, ColumnWidths, TableStyle, VerticalAlign};
 
 /// The RGB color type used throughout the theme and text APIs, re-exported
 /// from krilla (also available as [`crate::Color`]).

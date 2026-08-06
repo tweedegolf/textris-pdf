@@ -31,13 +31,13 @@ use std::io::{self, Cursor};
 use docx_rs::{
     AlignmentType, BreakType, Docx, FieldCharType, Footer, Header, InstrNUMPAGES, InstrPAGE,
     InstrText, LineSpacing, LineSpacingType, PageMargin, Paragraph, Run, RunFonts, Shading,
-    ShdType, SpecialIndentType, Table as DocxTable, TableCell, TableRow, WidthType,
+    ShdType, SpecialIndentType, Table as DocxTable, TableCell, TableRow, VAlignType, WidthType,
 };
 use krilla::color::rgb;
 
 use crate::{
     model::{Block, Cell, Chrome, Document, Inline, SectionContent},
-    theme::{Align, Palette, Theme},
+    theme::{Align, Palette, Theme, VerticalAlign},
 };
 
 /// The monospace family used for `mono` runs.
@@ -320,7 +320,9 @@ fn build_row(
             let align = style.align.get(column).copied().unwrap_or(Align::Left);
             let paragraph =
                 cell_paragraph(cells.get(column), align, size, header, base_italic, palette);
-            let mut cell = TableCell::new().add_paragraph(paragraph);
+            let mut cell = TableCell::new()
+                .add_paragraph(paragraph)
+                .vertical_align(vertical_alignment(style.valign));
             if striped {
                 cell = cell.shading(fill(palette.highlight));
             }
@@ -413,6 +415,15 @@ fn alignment(align: Align) -> AlignmentType {
         Align::Left => AlignmentType::Left,
         Align::Center => AlignmentType::Center,
         Align::Right => AlignmentType::Right,
+    }
+}
+
+/// Map our in-cell vertical alignment to Word's.
+fn vertical_alignment(valign: VerticalAlign) -> VAlignType {
+    match valign {
+        VerticalAlign::Top => VAlignType::Top,
+        VerticalAlign::Middle => VAlignType::Center,
+        VerticalAlign::Bottom => VAlignType::Bottom,
     }
 }
 

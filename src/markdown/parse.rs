@@ -98,6 +98,8 @@
 //! - `widths` is a space-separated list per column: `auto`, a bare integer
 //!   ([`ColumnWidth::Fraction`]), or a point value like `120pt`
 //!   ([`ColumnWidth::Absolute`]; `em` also accepted).
+//! - `valign = "top"`, `"middle"` or `"bottom"` sets how cell content sits in a
+//!   row taller than its own content ([`VerticalAlign`]; `top` by default).
 //! - `striped`, `row-height`, `font-size` and `flush-first` override the
 //!   corresponding [`TableStyle`] fields.
 //!
@@ -157,7 +159,9 @@ use crate::{
         Block, Cell, Chrome, Document, Inline, ListMarker, SectionContent, Table, TaskItem,
         plain_text,
     },
-    theme::{Align, BoxStyle, Color, ColumnWidth, ColumnWidths, Palette, TableStyle, em},
+    theme::{
+        Align, BoxStyle, Color, ColumnWidth, ColumnWidths, Palette, TableStyle, VerticalAlign, em,
+    },
 };
 
 /// Options for [`parse_markdown`] and
@@ -1004,6 +1008,21 @@ impl Parser<'_> {
         }
         if let Some(spec) = attrs.string("widths")? {
             style.columns = column_widths(&spec, attrs.line)?;
+        }
+        if let Some(choice) = attrs.string("valign")? {
+            style.valign = match choice.as_str() {
+                "top" => VerticalAlign::Top,
+                "middle" => VerticalAlign::Middle,
+                "bottom" => VerticalAlign::Bottom,
+                other => {
+                    return err(
+                        attrs.line,
+                        format!(
+                            "unknown vertical alignment `{other}` (use `top`, `middle` or `bottom`)"
+                        ),
+                    );
+                }
+            };
         }
         if let Some(striped) = attrs.bool("striped")? {
             style.striped = striped;
@@ -1907,6 +1926,26 @@ mod tests {
         assert!(style.flush_first_column);
         assert_eq!(style.row_min_height, Some(31.5));
         assert_eq!(style.font_size, Some(8.0));
+    }
+
+    #[test]
+    fn table_vertical_alignment_comes_from_the_valign_attribute() {
+        let source = |value: &str| format!("{{ valign = \"{value}\" }}\n| a |\n| - |\n| 1 |\n");
+        for (value, expected) in [
+            ("top", VerticalAlign::Top),
+            ("middle", VerticalAlign::Middle),
+            ("bottom", VerticalAlign::Bottom),
+        ] {
+            let blocks = parse(&source(value));
+            assert_eq!(table(&blocks[0]).style.valign, expected, "valign {value}");
+        }
+
+        // Top by default, and an unknown value is a parse error.
+        let blocks = parse("| a |\n| - |\n| 1 |\n");
+        assert_eq!(table(&blocks[0]).style.valign, VerticalAlign::Top);
+        let error = parse_err(&source("centre"));
+        assert_eq!(error.line, 1);
+        assert!(error.message.contains("vertical alignment"), "{error}");
     }
 
     #[test]

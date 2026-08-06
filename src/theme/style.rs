@@ -20,6 +20,18 @@ pub enum Align {
     Right,
 }
 
+/// Vertical alignment of a cell's content within its row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VerticalAlign {
+    /// Align the first line to the cell's top inset.
+    #[default]
+    Top,
+    /// Center the content between the cell's insets.
+    Middle,
+    /// Align the last line to the cell's bottom inset.
+    Bottom,
+}
+
 /// How a single column is sized within a [`ColumnWidths::Custom`] layout.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ColumnWidth {
@@ -101,6 +113,20 @@ pub struct TableStyle {
     /// };
     /// ```
     pub align: Vec<Align>,
+    /// Vertical alignment of cell content within its row, for rows taller than
+    /// their own content (a row minimum height, or a cell next to a taller
+    /// one). Defaults to [`VerticalAlign::Top`].
+    ///
+    /// ```
+    /// use textris_pdf::theme::{TableStyle, VerticalAlign};
+    ///
+    /// // A data table whose cells center vertically in tall rows.
+    /// let centered = TableStyle {
+    ///     valign: VerticalAlign::Middle,
+    ///     ..TableStyle::data()
+    /// };
+    /// ```
+    pub valign: VerticalAlign,
     /// Font size for the table's cells, in points. `None` uses the theme's
     /// [body size](super::FontSizes::body).
     pub font_size: Option<f32>,
@@ -121,6 +147,7 @@ impl TableStyle {
             flush_first_column: false,
             columns: ColumnWidths::Auto,
             align: Vec::new(),
+            valign: VerticalAlign::Top,
             font_size: None,
             row_min_height: None,
         }
@@ -138,6 +165,7 @@ impl TableStyle {
             flush_first_column: true,
             columns: ColumnWidths::Labels,
             align: Vec::new(),
+            valign: VerticalAlign::Top,
             font_size: None,
             row_min_height: None,
         }

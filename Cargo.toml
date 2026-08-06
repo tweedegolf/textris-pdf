@@ -1,12 +1,14 @@
 [package]
 name = "textris-pdf"
-version = "0.8.0"
+version = "0.9.0"
 license = "MIT"
 edition = "2024"
 
 [dependencies]
 harfrust = "0.12"
 krilla = { version = "0.8", default-features = false }
+# Pinned to whatever `harfrust` depends on: font tables read here are handed
+# straight to the shaper, so a second `read-fonts` version does not type-check.
 read-fonts = "0.41"
 time = { version = "0.3", default-features = false, features = ["std"] }
 docx-rs = { version = "0.4", optional = true }

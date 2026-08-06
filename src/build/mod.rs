@@ -85,6 +85,9 @@ where
 #[derive(Debug, Default, Clone)]
 pub struct Textris {
     doc: Document,
+    /// See [`source_map`](Self::source_map).
+    #[cfg(feature = "markdown-parser")]
+    source_map: Vec<(usize, usize)>,
 }
 
 impl Textris {
@@ -92,6 +95,8 @@ impl Textris {
     pub fn new() -> Self {
         Self {
             doc: Document::default(),
+            #[cfg(feature = "markdown-parser")]
+            source_map: Vec::new(),
         }
     }
 
@@ -103,6 +108,8 @@ impl Textris {
                 theme,
                 ..Document::default()
             },
+            #[cfg(feature = "markdown-parser")]
+            source_map: Vec::new(),
         }
     }
 
@@ -119,6 +126,16 @@ impl Textris {
     /// required for accessible output; it defaults to `"en"` when left unset.
     pub fn language(&mut self, language: impl Into<String>) -> &mut Self {
         self.doc.language = Some(language.into());
+        self
+    }
+
+    /// Set the creation date written to the PDF metadata, as Unix seconds.
+    ///
+    /// The renderer otherwise reads the system clock. Pin it to render the same
+    /// document to the same bytes twice, or on targets without a clock — notably
+    /// `wasm32-unknown-unknown`, where the fallback is the Unix epoch.
+    pub fn created_at(&mut self, unix_seconds: i64) -> &mut Self {
+        self.doc.created = Some(unix_seconds);
         self
     }
 
@@ -669,13 +686,44 @@ impl Textris {
         source: &str,
         options: &crate::markdown::ParseOptions,
     ) -> Result<&mut Self, crate::markdown::MarkdownParseError> {
-        let (front_matter, blocks) =
+        let (front_matter, blocks, source_lines) =
             crate::markdown::parse::parse_document(source, options, &self.doc.theme.palette)?;
         if let Some(front_matter) = front_matter {
             front_matter.apply(&mut self.doc);
         }
+        let first = self.doc.blocks.len();
+        self.source_map.extend(
+            source_lines
+                .into_iter()
+                .enumerate()
+                .map(|(offset, line)| (first + offset, line)),
+        );
         self.doc.blocks.extend(blocks);
         Ok(self)
+    }
+
+    /// Where each block parsed by [`push_markdown`](Self::push_markdown) came
+    /// from: its index in [`Document::blocks`] paired with the 1-based source
+    /// line it starts at, in ascending order.
+    ///
+    /// Combined with [`Layout::block_pages`](crate::layout::Layout::block_pages)
+    /// this maps a position in the source to the page it renders on — what an
+    /// editor needs to show the page it is editing. Blocks added through the
+    /// builder methods rather than parsed from Markdown have no entry, so the
+    /// map may be shorter than the document.
+    ///
+    /// ```
+    /// # use textris_pdf::{build::Textris, markdown::ParseOptions};
+    /// let mut doc = Textris::new();
+    /// doc.paragraph("Added through the builder, so unmapped.");
+    /// doc.push_markdown("# Heading\n\nA paragraph.\n", &ParseOptions::default())?;
+    /// // Block 0 is the builder's paragraph; the parsed blocks start at 1.
+    /// assert_eq!(doc.source_map(), [(1, 1), (2, 3)]);
+    /// # Ok::<(), textris_pdf::markdown::MarkdownParseError>(())
+    /// ```
+    #[cfg(feature = "markdown-parser")]
+    pub fn source_map(&self) -> &[(usize, usize)] {
+        &self.source_map
     }
 }
 

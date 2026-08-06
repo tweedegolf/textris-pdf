@@ -167,3 +167,23 @@ fn a_document_without_headings_still_renders_accessibly() {
         "a fallback outline should exist"
     );
 }
+
+#[test]
+fn pinning_the_creation_date_makes_the_output_reproducible() {
+    let fonts = load_fonts();
+    let render = || {
+        let mut doc = Textris::new();
+        doc.title("Reproducible").created_at(1_700_000_000);
+        doc.h1("Overview");
+        doc.paragraph("The same document should render to the same bytes.");
+        doc.render(&fonts).expect("should render")
+    };
+
+    assert_eq!(
+        render(),
+        render(),
+        "a pinned creation date should be the only clock the renderer reads"
+    );
+    // 2023-11-14T22:13:20Z, the pinned timestamp, as a PDF date string.
+    assert!(contains(&render(), "D:20231114221320"));
+}

@@ -36,6 +36,7 @@ pub fn layout(document: &Document, fonts: &Fonts) -> Layout {
         structure: engine.structure.roots,
         outline: engine.outline,
         nodes: engine.structure.next_id,
+        block_pages: engine.block_pages,
     }
 }
 
@@ -125,6 +126,8 @@ struct Engine<'a> {
     current_tag: Tagging,
     /// Heading bookmarks collected for the outline, in document order.
     outline: Vec<OutlineEntry>,
+    /// The page each top-level block started on; see [`Layout::block_pages`].
+    block_pages: Vec<usize>,
 }
 
 impl<'a> Engine<'a> {
@@ -139,7 +142,17 @@ impl<'a> Engine<'a> {
             structure: StructureBuilder::default(),
             current_tag: Tagging::Artifact,
             outline: Vec::new(),
+            block_pages: Vec::new(),
         }
+    }
+
+    /// Record that the next top-level block starts on the current page.
+    ///
+    /// Called once per element of `Document::blocks`, in order, so the result
+    /// stays parallel to it. Blocks nested inside a box are not top-level and
+    /// are deliberately not recorded.
+    fn record_block_start(&mut self) {
+        self.block_pages.push(self.pages.len() - 1);
     }
 
     /// Width of the current content region.
@@ -204,6 +217,10 @@ impl<'a> Engine<'a> {
         while i < blocks.len() {
             if matches!(blocks[i], Block::PageBreak) {
                 self.force_page_break();
+                // Recorded after the break, so a cursor sitting on the
+                // `@pagebreak` maps to the page it opens rather than the one
+                // it closes.
+                self.record_block_start();
                 prev = None;
                 i += 1;
             } else if matches!(blocks[i], Block::Heading { .. }) {
@@ -221,6 +238,7 @@ impl<'a> Engine<'a> {
             } else {
                 let cur = kind_of(&blocks[i]);
                 self.y += self.gap_before(prev, cur);
+                self.record_block_start();
                 self.layout_block(&blocks[i]);
                 prev = Some(cur);
                 i += 1;
@@ -449,6 +467,7 @@ impl<'a> Engine<'a> {
             if index > 0 {
                 self.y += self.gap_before(prev, kind_of(block));
             }
+            self.record_block_start();
             self.layout_block(block);
             prev = Some(kind_of(block));
         }

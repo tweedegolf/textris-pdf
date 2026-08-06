@@ -224,7 +224,7 @@ fn err<T>(line: usize, message: impl Into<String>) -> Result<T> {
 /// front matter sets document chrome and there is nowhere to put it in a
 /// `Vec<Block>`. Use `push_markdown` for such documents.
 pub fn parse_markdown(source: &str, options: &ParseOptions) -> Result<Vec<Block>> {
-    let (front_matter, blocks) = parse_document(source, options, &Palette::default())?;
+    let (front_matter, blocks, _) = parse_document(source, options, &Palette::default())?;
     if front_matter.is_some() {
         return err(
             1,
@@ -275,11 +275,14 @@ fn set_slot(dst: &mut Option<SectionContent>, src: Option<SectionContent>) {
 /// `palette` to resolve box `background` roles. The builder's `push_markdown`
 /// passes the document theme's palette and applies the front matter; the free
 /// [`parse_markdown`] passes the default palette and rejects front matter.
+///
+/// The third element pairs with the blocks: the 1-based source line each one
+/// was parsed from.
 pub(crate) fn parse_document(
     source: &str,
     options: &ParseOptions,
     palette: &Palette,
-) -> Result<(Option<FrontMatter>, Vec<Block>)> {
+) -> Result<(Option<FrontMatter>, Vec<Block>, Vec<usize>)> {
     let lines: Vec<Line> = source
         .lines()
         .enumerate()
@@ -290,8 +293,8 @@ pub(crate) fn parse_document(
         .collect();
     let parser = Parser { options, palette };
     let (front_matter, body_start) = parser.front_matter(&lines)?;
-    let blocks = parser.blocks(&lines[body_start..])?;
-    Ok((front_matter, blocks))
+    let (blocks, source_lines) = parser.blocks(&lines[body_start..])?.into_iter().unzip();
+    Ok((front_matter, blocks, source_lines))
 }
 
 /// One source line, carrying its 1-based number for error reporting. Quote
@@ -658,7 +661,11 @@ impl Parser<'_> {
 
     /// Group lines into blocks: skip blank separators, bind attribute lines to
     /// the block that follows, and require a blank line between blocks.
-    fn blocks(&self, lines: &[Line]) -> Result<Vec<Block>> {
+    ///
+    /// Each block is paired with the 1-based source line it starts at (its
+    /// attribute line, when it has one), which is what
+    /// [`parse_document`] turns into a source map.
+    fn blocks(&self, lines: &[Line]) -> Result<Vec<(Block, usize)>> {
         let mut out = Vec::new();
         let mut i = 0;
         while i < lines.len() {
@@ -666,6 +673,10 @@ impl Parser<'_> {
                 i += 1;
                 continue;
             }
+            // Where this block starts, for the source map: an attribute line
+            // belongs to the block it binds to, so take the line before
+            // consuming it.
+            let start = lines[i].number;
             let attrs = if classify(lines[i].text) == Kind::Attribute {
                 let parsed = self.attributes(&lines[i])?;
                 i += 1;
@@ -690,7 +701,7 @@ impl Parser<'_> {
             };
 
             let (block, next) = self.block(lines, i, attrs)?;
-            out.push(block);
+            out.push((block, start));
             i = next;
             if let Some(line) = lines.get(i)
                 && classify(line.text) != Kind::Blank
@@ -796,7 +807,9 @@ impl Parser<'_> {
         Ok((
             Block::Box {
                 style,
-                content: self.blocks(&inner)?,
+                // Blocks nested in a box are not top-level, so their source
+                // lines go unused: the source map covers top-level blocks only.
+                content: self.blocks(&inner)?.into_iter().map(|(b, _)| b).collect(),
             },
             i,
         ))

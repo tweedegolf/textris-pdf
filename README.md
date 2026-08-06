@@ -43,6 +43,30 @@ command line:
 cargo test --test render_example
 ```
 
+## Live editor
+
+[`textris-web-editor/`](textris-web-editor/) is a browser editor for the
+Markdown dialect: type on the left, see the rendered PDF on the right. The
+whole renderer runs client-side as WebAssembly — no server, nothing uploaded.
+
+![The editor: highlighted dialect source on the left, the rendered PDF on the right](docs/web-editor.png)
+
+```bash
+cargo install trunk && rustup target add wasm32-unknown-unknown
+cd textris-web-editor && trunk serve      # http://localhost:8080
+```
+
+Nothing about the library is browser-specific: it does no font discovery, no
+threading and no I/O, so the only thing wasm needs that a native build does not
+is a creation date, since `wasm32-unknown-unknown` has no clock. Supply one
+with [`Textris::created_at`](src/build/mod.rs); it also makes the output
+reproducible. A render of the bundled sample takes about 6 ms in the browser.
+
+The preview scrolls to the page you are editing, using
+[`Textris::source_map`](src/build/mod.rs) (source line per parsed block) joined
+with [`Layout::block_pages`](src/layout/display.rs) (page per top-level block).
+Both are ordinary library API, so any editor integration can use them.
+
 ## Architecture
 
 The pipeline has decoupled stages, each in its own module and independently

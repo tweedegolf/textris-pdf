@@ -49,7 +49,12 @@ cargo test --test render_example
 Markdown dialect: type on the left, see the rendered PDF on the right. The
 whole renderer runs client-side as WebAssembly — no server, nothing uploaded.
 
+**[Try it live](https://tweedegolf.github.io/textris-pdf/)** (published from
+`main` by [`pages.yml`](.github/workflows/pages.yml))
+
 ![The editor: highlighted dialect source on the left, the rendered PDF on the right](docs/web-editor.png)
+
+Or run it locally:
 
 ```bash
 cargo install trunk && rustup target add wasm32-unknown-unknown
@@ -73,8 +78,7 @@ The pipeline has decoupled stages, each in its own module and independently
 testable:
 
 ```
-build ─▶ model ─▶ layout ─▶ render ─▶ PDF
-(API)  (Document) (pages)   (krilla)
+build / (markdown -> parse) -> model -> layout -> render -> PDF
 ```
 
 | Module | Responsibility |

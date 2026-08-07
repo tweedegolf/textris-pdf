@@ -138,11 +138,32 @@ button:not(:disabled):hover {
   font-size: 0.8125rem;
 }
 
+/* The 16px padding and page margin are PAGE_GUTTER in main.js. */
 #preview {
+  position: relative; /* anchors the pages' offsetTop for scroll syncing */
   flex: 1;
-  width: 100%;
-  border: 0;
+  min-height: 0;
+  overflow: auto;
+  padding: 16px;
   background: #e8e4df;
+  /* Scrolling is driven from the editor; keep the browser's anchoring and a
+     late-appearing scrollbar from shifting things under it. */
+  overflow-anchor: none;
+  scrollbar-gutter: stable;
+}
+
+#preview .page {
+  margin: 0 auto 16px;
+  background: #fff;
+  box-shadow: 0 1px 4px rgba(27, 26, 23, 0.25);
+}
+
+#preview .page:last-child {
+  margin-bottom: 0;
+}
+
+#preview .page canvas {
+  display: block;
 }
 
 @media (max-width: 800px) {

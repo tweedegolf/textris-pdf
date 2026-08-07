@@ -5,6 +5,10 @@ see the rendered PDF on the right. The whole renderer — parsing, shaping,
 layout and PDF serialization — runs in the browser as WebAssembly; nothing is
 uploaded anywhere.
 
+A build of `main` is published at
+**<https://tweedegolf.github.io/textris-pdf/>** by
+[`pages.yml`](../.github/workflows/pages.yml).
+
 ![The editor: highlighted dialect source on the left, the rendered PDF on the right](../docs/web-editor.png)
 
 ## Running it
@@ -46,10 +50,26 @@ On failure the preview keeps showing the last good PDF, and the parse error —
 which carries a 1-based line number but no column, matching
 `MarkdownParseError` — is shown in the error bar and marked in the gutter.
 
+## The preview
+
+The preview is [pdf.js](https://mozilla.github.io/pdf.js/) (pinned from
+jsdelivr in `main.js`, parsing in a real worker), drawing one canvas per page
+into a scrollable pane. Not the browser's own `<iframe>` viewer, for one
+reason: an iframe viewer can only be re-pointed by navigating to a fresh blob
+URL, which reloads the whole viewer and blinks on every re-render. With
+canvases, a re-render draws each page off-DOM and swaps it in only when
+finished, so the last good rendering stays up throughout and an edit appears
+as a seamless in-place update.
+
+Pages are drawn lazily — an `IntersectionObserver` renders them half a
+viewport before they scroll in — so a re-render costs only the pages you are
+looking at. The `fit` selector and pane resizes just pick a new render scale;
+they re-draw the canvases without re-rendering the PDF.
+
 ## Following the edit
 
-The preview scrolls to the page you are editing. That needs a map from source
-lines to pages, which the library now provides in two halves:
+The preview follows the editor. That needs a map from source lines to pages,
+which the library provides in two halves:
 
 - [`Textris::source_map`](../src/build/mod.rs) — the source line each parsed
   block came from, recorded by `push_markdown`;
@@ -57,48 +77,25 @@ lines to pages, which the library now provides in two halves:
   block started on, recorded by the layout engine.
 
 The editor joins them and binary-searches for the last block starting at or
-before the edited line. A block that spans a page boundary is recorded at the
-page it *starts* on, so a cursor deep inside a long table maps to that table's
-first page.
+before a given line, interpolating between neighbouring blocks to get a
+fractional page position. That map drives two behaviours:
 
-It follows the last **edit**, not the cursor. Re-pointing the viewer costs a
-reload (see below), and paying that for every arrow key would flicker.
+- **Scrolling the editor scrolls the preview** to match the line at the top of
+  the view. One-way only, so the two never chase each other.
+- **After an edit re-renders**, the preview scrolls to where the edited line
+  landed — but only if it is not already in view.
 
-## Two things worth knowing
+A block that spans a page boundary is recorded at the page it *starts* on, so
+a line deep inside a long table maps to that table's first page.
+
+## One thing worth knowing
 
 **The creation date is fixed per session.** `wasm32-unknown-unknown` has no
 clock, so the page passes one in (`Document::created`, via
 `Textris::created_at`). Pinning it for the session rather than reading
 `Date.now()` per render also means an edit that does not change the layout
-produces byte-identical output, which the preview uses to leave your scroll
-position alone.
-
-**The preview is the browser's own PDF viewer**, driven entirely through
-Acrobat-style open parameters in the URL fragment:
-
-| Parameter | Effect |
-| --- | --- |
-| `toolbar=0` | Removes the viewer's toolbar *and* its thumbnail sidebar, leaving only the page. |
-| `navpanes=0` | Belt-and-braces for viewers that treat the sidebar separately. |
-| `page=N` | Opens on page N — how the preview follows your edit. |
-| `view=Fit` | Scales a whole page into view; omitted, the viewer fits to width. |
-
-The catch: these are honoured only on the *initial* navigation to a blob URL.
-Changing the fragment afterwards, by `src` or by `location.hash`, is silently
-ignored. So re-targeting means minting a fresh blob URL, which reloads the
-viewer — free on a re-render, since the bytes changed and the URL had to change
-anyway, and why the preview is left strictly alone when the bytes, the page and
-the fit all held still.
-
-Two consequences worth knowing. The viewer briefly paints page 1 before
-jumping to the target, so a fast eye catches a flash on documents of a few
-pages. And because the toolbar is gone, so is the viewer's zoom control —
-hence the `fit` selector in the toolbar, and the page counter in the status
-bar. Rendering to a canvas with pdf.js would remove the reload entirely, at
-the cost of about a megabyte of JavaScript.
-
-All of this is verified in Chrome. Other browsers may ignore the parameters
-and show their own chrome; nothing breaks if they do.
+produces byte-identical output, which the preview uses to skip the pdf.js
+reload entirely.
 
 ## Fonts
 

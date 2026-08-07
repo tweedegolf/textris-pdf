@@ -64,10 +64,7 @@
       </label>
       <label class="field">
         fit
-        <!--
-          The viewer's own zoom control is gone with its toolbar, so the fit
-          mode has to be offered here.
-        -->
+        <!-- Picks the pdf.js render scale; see `fitScale` in main.js. -->
         <select id="fit">
           <option value="width">width</option>
           <option value="page">page</option>
@@ -83,7 +80,8 @@
         <p id="error" class="error" hidden></p>
       </section>
       <section class="pane pane-preview">
-        <iframe id="preview" title="Rendered PDF"></iframe>
+        <!-- main.js renders pages into this with pdf.js, one canvas per page. -->
+        <div id="preview" role="img" aria-label="Rendered PDF"></div>
       </section>
     </main>
 

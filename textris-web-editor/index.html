@@ -3,7 +3,30 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>textris-pdf — live editor</title>
+    <title>textris-pdf | live editor</title>
+
+    <!--
+      CodeMirror 6 is loaded as ESM straight from esm.sh, so this app needs no
+      npm and no bundler. Every package is pinned, and each one lists its
+      CodeMirror peers as `external` so they resolve back through this map:
+      two copies of @codemirror/state in one page break CodeMirror outright.
+    -->
+    <script type="importmap">
+      {
+        "imports": {
+          "@codemirror/state": "https://esm.sh/@codemirror/state@6.7.1",
+          "@codemirror/view": "https://esm.sh/@codemirror/view@6.43.8?external=@codemirror/state,style-mod,w3c-keyname",
+          "@codemirror/language": "https://esm.sh/@codemirror/language@6.12.4?external=@codemirror/state,@codemirror/view,@lezer/common,@lezer/highlight,style-mod",
+          "@codemirror/lint": "https://esm.sh/@codemirror/lint@6.9.7?external=@codemirror/state,@codemirror/view,crelt",
+          "@codemirror/commands": "https://esm.sh/@codemirror/commands@6.10.4?external=@codemirror/state,@codemirror/view,@codemirror/language,@lezer/common",
+          "@lezer/highlight": "https://esm.sh/@lezer/highlight@1.2.3?external=@lezer/common",
+          "@lezer/common": "https://esm.sh/@lezer/common@1.5.2",
+          "style-mod": "https://esm.sh/style-mod@4.1.3",
+          "w3c-keyname": "https://esm.sh/w3c-keyname@2.2.8",
+          "crelt": "https://esm.sh/crelt@1.0.7"
+        }
+      }
+    </script>
 
     <!--
       Trunk builds this page: it compiles the crate to wasm, runs the matching
@@ -26,33 +49,6 @@
     <link data-trunk rel="copy-file" href="../tests/fonts/Newsreader/LICENSE" data-target-path="fonts/Newsreader" />
     <link data-trunk rel="copy-file" href="../tests/fonts/Fira_Code/LICENSE" data-target-path="fonts/Fira_Code" />
     <link data-trunk rel="copy-file" href="../tests/mantis-shrimp-example-input.md" />
-
-    <!--
-      CodeMirror 6 is loaded as ESM straight from esm.sh, so this app needs no
-      npm and no bundler. Every package is pinned, and each one lists its
-      CodeMirror peers as `external` so they resolve back through this map:
-      two copies of @codemirror/state in one page break CodeMirror outright.
-
-      To run offline, vendor the graph instead:
-        npx esbuild main.js --bundle --format=esm --outfile=bundle.js
-      and point the module script at the bottom of this file at bundle.js.
-    -->
-    <script type="importmap">
-      {
-        "imports": {
-          "@codemirror/state": "https://esm.sh/@codemirror/state@6.7.1",
-          "@codemirror/view": "https://esm.sh/@codemirror/view@6.43.8?external=@codemirror/state,style-mod,w3c-keyname",
-          "@codemirror/language": "https://esm.sh/@codemirror/language@6.12.4?external=@codemirror/state,@codemirror/view,@lezer/common,@lezer/highlight,style-mod",
-          "@codemirror/lint": "https://esm.sh/@codemirror/lint@6.9.7?external=@codemirror/state,@codemirror/view,crelt",
-          "@codemirror/commands": "https://esm.sh/@codemirror/commands@6.10.4?external=@codemirror/state,@codemirror/view,@codemirror/language,@lezer/common",
-          "@lezer/highlight": "https://esm.sh/@lezer/highlight@1.2.3?external=@lezer/common",
-          "@lezer/common": "https://esm.sh/@lezer/common@1.5.2",
-          "style-mod": "https://esm.sh/style-mod@4.1.3",
-          "w3c-keyname": "https://esm.sh/w3c-keyname@2.2.8",
-          "crelt": "https://esm.sh/crelt@1.0.7"
-        }
-      }
-    </script>
   </head>
 
   <body>
@@ -64,10 +60,7 @@
       </label>
       <label class="field">
         fit
-        <!--
-          The viewer's own zoom control is gone with its toolbar, so the fit
-          mode has to be offered here.
-        -->
+        <!-- Picks the pdf.js render scale; see `fitScale` in main.js. -->
         <select id="fit">
           <option value="width">width</option>
           <option value="page">page</option>
@@ -83,7 +76,8 @@
         <p id="error" class="error" hidden></p>
       </section>
       <section class="pane pane-preview">
-        <iframe id="preview" title="Rendered PDF"></iframe>
+        <!-- main.js renders pages into this with pdf.js, one canvas per page. -->
+        <div id="preview" role="img" aria-label="Rendered PDF"></div>
       </section>
     </main>
 

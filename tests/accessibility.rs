@@ -1,7 +1,7 @@
 //! End-to-end checks that the rendered PDF is genuinely tagged and accessible.
 //!
 //! The renderer targets PDF/A-2A + PDF/UA-1, and krilla fails serialization on
-//! any conformance violation — so a successful `render` already proves the
+//! any conformance violation - so a successful `render` already proves the
 //! document validates. These tests additionally assert that the accessibility
 //! scaffolding (structure tree, marked content, title/language metadata,
 //! outline) is present in the output bytes, and that the title falls back to the

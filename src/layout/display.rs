@@ -52,6 +52,15 @@ pub struct Layout {
     /// which is what an editor needs to show the page it is editing. A block
     /// that spans pages is recorded at the page it *starts* on.
     pub block_pages: Vec<usize>,
+    /// The top edge of each top-level block in page space (distance from the
+    /// page top, in points - the same convention as [`OutlineEntry::y`]),
+    /// parallel to [`block_pages`](Self::block_pages).
+    ///
+    /// Together the two pin every block to a `(page, y)` position, which is
+    /// what an editor needs to map a click in a rendered page back to the
+    /// block under it. A spacer's recorded top can exceed the content height;
+    /// `(page, top)` is still non-decreasing in document order.
+    pub block_tops: Vec<f32>,
 }
 
 impl std::ops::Deref for Layout {

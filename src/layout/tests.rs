@@ -1682,6 +1682,7 @@ fn block_pages_has_one_entry_per_top_level_block() {
     assert_eq!(laid_out.block_pages.len(), document.blocks.len());
     // Everything before the page break is on page 0, everything after on page 1.
     assert_eq!(laid_out.block_pages, vec![0, 0, 0, 1, 1, 1]);
+    assert_eq!(laid_out.block_tops.len(), document.blocks.len());
 }
 
 #[test]
@@ -1703,5 +1704,46 @@ fn block_pages_follows_content_across_a_page_break() {
     assert_eq!(
         *laid_out.block_pages.last().unwrap(),
         laid_out.pages.len() - 1
+    );
+
+    // The tops pin each block to a (page, y) position, which must likewise be
+    // non-decreasing in document order for a positional lookup to work.
+    assert_eq!(laid_out.block_tops.len(), document.blocks.len());
+    assert_eq!(laid_out.block_tops[0], document.theme.page.content_top());
+    let positions: Vec<(usize, f32)> = laid_out
+        .block_pages
+        .iter()
+        .copied()
+        .zip(laid_out.block_tops.iter().copied())
+        .collect();
+    assert!(
+        positions
+            .windows(2)
+            .all(|w| w[0].0 < w[1].0 || (w[0].0 == w[1].0 && w[0].1 <= w[1].1)),
+        "block (page, top) positions must be non-decreasing: {positions:?}"
+    );
+}
+
+/// A block whose own layout run triggers the page break (nothing of it fits on
+/// the current page) must be recorded on the page it actually lands on, not on
+/// the page the pen sat on before the break.
+#[test]
+fn block_start_is_patched_past_a_break_inside_the_block() {
+    let fonts = test_fonts();
+    let mut doc = Textris::new();
+    doc.paragraph("Fits on the first page.");
+    // Pushes the pen past the bottom without drawing anything, so the next
+    // paragraph's first line breaks inside its own layout run.
+    doc.spacer(10_000.0);
+    doc.paragraph("Lands at the top of the second page.");
+
+    let document = doc.build();
+    let laid_out = layout(&document, &fonts);
+
+    assert_eq!(laid_out.pages.len(), 2);
+    assert_eq!(laid_out.block_pages, vec![0, 0, 1]);
+    assert_eq!(
+        *laid_out.block_tops.last().unwrap(),
+        document.theme.page.content_top()
     );
 }

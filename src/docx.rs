@@ -2,8 +2,8 @@
 //!
 //! This translates the layout-agnostic [`Document`] model into a Word document
 //! with [`docx-rs`](docx_rs). It is deliberately a *structural* export: the
-//! result reproduces the document's content and coarse structure — headings,
-//! paragraphs, tables, lists, callout boxes and header/footer chrome — but not
+//! result reproduces the document's content and coarse structure - headings,
+//! paragraphs, tables, lists, callout boxes and header/footer chrome - but not
 //! the pixel-level styling of the PDF renderer.
 //!
 //! Several shortcuts are taken where faithful styling is hard to express in the

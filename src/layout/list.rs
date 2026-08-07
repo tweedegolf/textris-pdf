@@ -69,8 +69,8 @@ impl Engine<'_> {
         self.ensure(content_h.max(box_size));
         let top = self.y;
 
-        // Center the box on the first line's visible text — the cap-height
-        // band (cap top to baseline) — not the line box, whose extra leading
+        // Center the box on the first line's visible text - the cap-height
+        // band (cap top to baseline) - not the line box, whose extra leading
         // all sits below the baseline and would push the box too low.
         let cap = self.fonts.cap_height(Style::Regular, size);
         let band_center = top + self.fonts.ascent(Style::Regular, size) - cap / 2.0;

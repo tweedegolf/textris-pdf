@@ -1658,3 +1658,50 @@ fn every_text_run_belongs_to_a_structure_node() {
         }
     }
 }
+
+/// The source map's other half: `block_pages` must stay parallel to
+/// `Document::blocks`, or a lookup by block index reads the wrong page.
+#[test]
+fn block_pages_has_one_entry_per_top_level_block() {
+    let fonts = test_fonts();
+    let mut doc = Textris::new();
+    doc.h1("Title");
+    doc.paragraph("A paragraph.");
+    // A box, whose nested blocks must *not* get their own entries.
+    doc.boxed(|inner| {
+        inner.paragraph("Inside the box.");
+        inner.paragraph("Also inside.");
+    });
+    doc.page_break();
+    doc.h3("Section");
+    doc.paragraph("After the break.");
+
+    let document = doc.build();
+    let laid_out = layout(&document, &fonts);
+
+    assert_eq!(laid_out.block_pages.len(), document.blocks.len());
+    // Everything before the page break is on page 0, everything after on page 1.
+    assert_eq!(laid_out.block_pages, vec![0, 0, 0, 1, 1, 1]);
+}
+
+#[test]
+fn block_pages_follows_content_across_a_page_break() {
+    let fonts = test_fonts();
+    let mut doc = Textris::new();
+    // Enough paragraphs to overflow a page without any explicit break.
+    for i in 0..80 {
+        doc.paragraph(format!("Paragraph number {i} with a little text in it."));
+    }
+    let document = doc.build();
+    let laid_out = layout(&document, &fonts);
+
+    assert_eq!(laid_out.block_pages.len(), document.blocks.len());
+    assert!(laid_out.pages.len() > 1, "the sample should overflow");
+    // Monotonic, starting at the first page and reaching the last.
+    assert_eq!(laid_out.block_pages[0], 0);
+    assert!(laid_out.block_pages.windows(2).all(|w| w[0] <= w[1]));
+    assert_eq!(
+        *laid_out.block_pages.last().unwrap(),
+        laid_out.pages.len() - 1
+    );
+}

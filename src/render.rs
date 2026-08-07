@@ -173,7 +173,7 @@ pub fn render(layout: &Layout, document: &Document, fonts: &Fonts) -> Result<Vec
         Metadata::new()
             .title(title.clone())
             .language(language)
-            .creation_date(now_datetime()),
+            .creation_date(creation_date(document.created)),
     );
 
     // A bookmark outline (required by PDF/UA), nested by heading level.
@@ -495,10 +495,12 @@ fn attach_outline(stack: &mut [(u8, OutlineNode)], outline: &mut Outline, node: 
     }
 }
 
-/// The current UTC time as a krilla [`DateTime`], for the document's creation
-/// date (required by PDF/A).
-fn now_datetime() -> DateTime {
-    let now = time::OffsetDateTime::now_utc();
+/// The document's creation date as a krilla [`DateTime`] (required by PDF/A):
+/// [`Document::created`] when set, otherwise the current UTC time.
+fn creation_date(created: Option<i64>) -> DateTime {
+    let now = created
+        .and_then(|seconds| time::OffsetDateTime::from_unix_timestamp(seconds).ok())
+        .unwrap_or_else(system_now);
     DateTime::new(now.year().clamp(0, 9999) as u16)
         .month(now.month() as u8)
         .day(now.day())
@@ -506,6 +508,19 @@ fn now_datetime() -> DateTime {
         .minute(now.minute())
         .second(now.second())
         .utc_offset_hour(0)
+}
+
+/// The current UTC time.
+#[cfg(not(target_arch = "wasm32"))]
+fn system_now() -> time::OffsetDateTime {
+    time::OffsetDateTime::now_utc()
+}
+
+/// `wasm32-unknown-unknown` has no clock — reading one panics — so documents
+/// that want a real creation date set [`Document::created`].
+#[cfg(target_arch = "wasm32")]
+fn system_now() -> time::OffsetDateTime {
+    time::OffsetDateTime::UNIX_EPOCH
 }
 
 fn solid_fill(color: rgb::Color) -> Fill {

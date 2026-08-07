@@ -1,0 +1,17 @@
+[package]
+name = "textris-web-editor"
+version = "0.1.0"
+license = "MIT"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Default features (`markdown` + `markdown-parser`) are what the editor needs.
+# `docx` stays off: it pulls in `image`, `zip` and `serde_json`, which would
+# dominate the bundle.
+textris-pdf = { path = ".." }
+wasm-bindgen = "0.2"
+console_error_panic_hook = "0.1"

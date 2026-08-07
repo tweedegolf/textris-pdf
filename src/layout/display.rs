@@ -44,6 +44,14 @@ pub struct Layout {
     /// The number of allocated [`NodeId`]s, i.e. the size of the id space the
     /// renderer must collect marked-content identifiers into.
     pub nodes: usize,
+    /// The 0-based page each top-level block started on, one entry per element
+    /// of [`Document::blocks`](crate::model::Document::blocks) and in the same
+    /// order.
+    ///
+    /// This maps a position in the document back to the page it landed on,
+    /// which is what an editor needs to show the page it is editing. A block
+    /// that spans pages is recorded at the page it *starts* on.
+    pub block_pages: Vec<usize>,
 }
 
 impl std::ops::Deref for Layout {

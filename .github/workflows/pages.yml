@@ -1,0 +1,76 @@
+# Publishes the web editor to GitHub Pages on every push to main.
+
+name: Pages
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deployment at a time; a newer push supersedes anything still queued.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          # Not shared with check.yml's key: same Cargo.lock, but this target/
+          # holds wasm artifacts.
+          key: ${{ runner.os }}-cargo-wasm-${{ hashFiles('**/Cargo.lock') }}
+
+      # A prebuilt binary: `cargo install trunk` would compile for minutes.
+      # Trunk fetches matching wasm-bindgen and wasm-opt itself.
+      - name: Install trunk
+        run: |
+          curl -sSfL https://github.com/trunk-rs/trunk/releases/download/v0.21.14/trunk-x86_64-unknown-linux-gnu.tar.gz \
+            | tar -xzf - -C /usr/local/bin trunk
+
+      - name: Build
+        working-directory: textris-web-editor
+        # A project site serves from /<repo>/, not /, and trunk needs to know
+        # that when it rewrites the asset links in index.html.
+        run: trunk build --release --public-url "/${{ github.event.repository.name }}/"
+
+      - name: Configure Pages
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6
+        with:
+          # Turns Pages on for the repository on first run, so there is no
+          # manual settings step.
+          enablement: true
+
+      - name: Upload site
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5
+        with:
+          path: textris-web-editor/dist
+
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5

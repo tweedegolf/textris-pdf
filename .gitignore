@@ -7,3 +7,6 @@ tests/*.md
 !tests/mantis-shrimp-example-input.md
 
 Cargo.lock
+
+# Trunk's build output for the web editor.
+textris-web-editor/dist/

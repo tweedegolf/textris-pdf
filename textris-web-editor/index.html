@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>textris-pdf — live editor</title>
+
+    <!--
+      Trunk builds this page: it compiles the crate to wasm, runs the matching
+      wasm-bindgen and wasm-opt (fetching both itself, so there is no CLI
+      version to keep in step), and stages the assets below into dist/.
+      `trunk serve` rebuilds and reloads on every change.
+    -->
+    <link data-trunk rel="rust" data-wasm-opt="s" data-bindgen-target="web" />
+    <link data-trunk rel="css" href="style.css" />
+    <link data-trunk rel="copy-file" href="main.js" />
+    <link data-trunk rel="copy-file" href="dialect.js" />
+
+    <!--
+      The fonts and the seed document are the ones the test suite uses; both
+      families are OFL-1.1, so their licences ship alongside them.
+    -->
+    <link data-trunk rel="copy-file" href="../tests/fonts/Newsreader/Newsreader-Variable.ttf" data-target-path="fonts" />
+    <link data-trunk rel="copy-file" href="../tests/fonts/Newsreader/Newsreader-Italic-Variable.ttf" data-target-path="fonts" />
+    <link data-trunk rel="copy-file" href="../tests/fonts/Fira_Code/FiraCode-Variable.ttf" data-target-path="fonts" />
+    <link data-trunk rel="copy-file" href="../tests/fonts/Newsreader/LICENSE" data-target-path="fonts/Newsreader" />
+    <link data-trunk rel="copy-file" href="../tests/fonts/Fira_Code/LICENSE" data-target-path="fonts/Fira_Code" />
+    <link data-trunk rel="copy-file" href="../tests/mantis-shrimp-example-input.md" />
+
+    <!--
+      CodeMirror 6 is loaded as ESM straight from esm.sh, so this app needs no
+      npm and no bundler. Every package is pinned, and each one lists its
+      CodeMirror peers as `external` so they resolve back through this map:
+      two copies of @codemirror/state in one page break CodeMirror outright.
+
+      To run offline, vendor the graph instead:
+        npx esbuild main.js --bundle --format=esm --outfile=bundle.js
+      and point the module script at the bottom of this file at bundle.js.
+    -->
+    <script type="importmap">
+      {
+        "imports": {
+          "@codemirror/state": "https://esm.sh/@codemirror/state@6.7.1",
+          "@codemirror/view": "https://esm.sh/@codemirror/view@6.43.8?external=@codemirror/state,style-mod,w3c-keyname",
+          "@codemirror/language": "https://esm.sh/@codemirror/language@6.12.4?external=@codemirror/state,@codemirror/view,@lezer/common,@lezer/highlight,style-mod",
+          "@codemirror/lint": "https://esm.sh/@codemirror/lint@6.9.7?external=@codemirror/state,@codemirror/view,crelt",
+          "@codemirror/commands": "https://esm.sh/@codemirror/commands@6.10.4?external=@codemirror/state,@codemirror/view,@codemirror/language,@lezer/common",
+          "@lezer/highlight": "https://esm.sh/@lezer/highlight@1.2.3?external=@lezer/common",
+          "@lezer/common": "https://esm.sh/@lezer/common@1.5.2",
+          "style-mod": "https://esm.sh/style-mod@4.1.3",
+          "w3c-keyname": "https://esm.sh/w3c-keyname@2.2.8",
+          "crelt": "https://esm.sh/crelt@1.0.7"
+        }
+      }
+    </script>
+  </head>
+
+  <body>
+    <header class="toolbar">
+      <h1>textris-pdf</h1>
+      <label class="field">
+        numbered heading levels
+        <input id="levels" type="text" value="3,4" size="6" spellcheck="false" />
+      </label>
+      <label class="field">
+        fit
+        <!-- Picks the pdf.js render scale; see `fitScale` in main.js. -->
+        <select id="fit">
+          <option value="width">width</option>
+          <option value="page">page</option>
+        </select>
+      </label>
+      <span id="status" class="status">loading…</span>
+      <button id="download" type="button" disabled>Download PDF</button>
+    </header>
+
+    <main class="panes">
+      <section class="pane pane-editor">
+        <div id="editor"></div>
+        <p id="error" class="error" hidden></p>
+      </section>
+      <section class="pane pane-preview">
+        <!-- main.js renders pages into this with pdf.js, one canvas per page. -->
+        <div id="preview" role="img" aria-label="Rendered PDF"></div>
+      </section>
+    </main>
+
+    <script type="module" src="main.js"></script>
+  </body>
+</html>

@@ -30,6 +30,11 @@ pub struct Document {
     /// `"en"`, `"en-GB"`), written to the PDF metadata. Required for accessible
     /// output; defaults to `"en"` when unset.
     pub language: Option<String>,
+    /// The creation date written to the PDF metadata (required by PDF/A), as
+    /// Unix seconds. When unset the renderer reads the system clock, which is
+    /// unavailable on `wasm32-unknown-unknown`: set it explicitly there, or to
+    /// make the rendered bytes reproducible.
+    pub created: Option<i64>,
 }
 
 impl Document {

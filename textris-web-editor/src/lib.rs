@@ -45,18 +45,21 @@ impl TextrisError {
     }
 }
 
-/// A rendered document, plus the map from source lines to the pages they
+/// A rendered document, plus the map from source lines to the positions they
 /// landed on.
 ///
-/// `lines` and `pages` are parallel and ascending by line: `lines[i]` is the
-/// 1-based source line a block starts at, and `pages[i]` the 1-based page it
-/// renders on. To find the page for a cursor line, take the last entry whose
-/// line is at or before it.
+/// `lines`, `pages` and `tops` are parallel and ascending by line: `lines[i]`
+/// is the 1-based source line a block starts at, `pages[i]` the 1-based page
+/// it renders on, and `tops[i]` its top edge on that page (distance from the
+/// page top, in points). To find the position for a cursor line, take the
+/// last entry whose line is at or before it; to find the line for a clicked
+/// position, take the last entry at or before that `(page, top)`.
 #[wasm_bindgen(getter_with_clone)]
 pub struct Rendered {
     pub pdf: Vec<u8>,
     pub lines: Vec<u32>,
     pub pages: Vec<u32>,
+    pub tops: Vec<f32>,
     pub page_count: u32,
 }
 
@@ -73,8 +76,8 @@ pub struct Renderer {
 #[wasm_bindgen]
 impl Renderer {
     /// Build the font set from three variable fonts: a roman, its italic
-    /// companion — both sharing the `wght` axis, from which regular and bold are
-    /// derived — and a monospace face.
+    /// companion - both sharing the `wght` axis, from which regular and bold are
+    /// derived - and a monospace face.
     #[wasm_bindgen(constructor)]
     pub fn new(roman: Vec<u8>, italic: Vec<u8>, mono: Vec<u8>) -> Result<Renderer, TextrisError> {
         // `from_owned` is the library's leak-once helper; take the `'static`
@@ -122,18 +125,26 @@ impl Renderer {
 
         // `get` rather than indexing: an out-of-range block index would panic,
         // and a panic traps the wasm module for the rest of the page's life.
-        let (lines, pages) = source_map
-            .iter()
-            .filter_map(|&(block, line)| {
-                let page = laid_out.block_pages.get(block)?;
-                Some((line as u32, *page as u32 + 1))
-            })
-            .unzip();
+        let mut lines = Vec::with_capacity(source_map.len());
+        let mut pages = Vec::with_capacity(source_map.len());
+        let mut tops = Vec::with_capacity(source_map.len());
+        for &(block, line) in &source_map {
+            let (Some(page), Some(top)) = (
+                laid_out.block_pages.get(block),
+                laid_out.block_tops.get(block),
+            ) else {
+                continue;
+            };
+            lines.push(line as u32);
+            pages.push(*page as u32 + 1);
+            tops.push(*top);
+        }
 
         Ok(Rendered {
             pdf,
             lines,
             pages,
+            tops,
             page_count: laid_out.pages.len() as u32,
         })
     }

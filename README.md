@@ -47,7 +47,7 @@ cargo test --test render_example
 
 [`textris-web-editor/`](textris-web-editor/) is a browser editor for the
 Markdown dialect: type on the left, see the rendered PDF on the right. The
-whole renderer runs client-side as WebAssembly — no server, nothing uploaded.
+whole renderer runs client-side as WebAssembly - no server, nothing uploaded.
 
 **[Try it live](https://tweedegolf.github.io/textris-pdf/)** (published from
 `main` by [`pages.yml`](.github/workflows/pages.yml))
@@ -104,8 +104,8 @@ Two design choices worth knowing:
 - **Accessibility is derived, not bolted on.** Alongside the display list, layout
   produces a logical structure tree (headings, paragraphs, lists, tables) in
   reading order and a heading outline. The renderer wraps every drawn run in a
-  marked-content sequence — real content linked to its structure node, page
-  furniture marked as an artifact — so the output is a valid tagged PDF. See
+  marked-content sequence - real content linked to its structure node, page
+  furniture marked as an artifact - so the output is a valid tagged PDF. See
   [Accessibility](#accessibility).
 
 ## The builder API
@@ -208,7 +208,7 @@ dialect template.
 Every document renders to a **tagged PDF** that conforms to both **PDF/A-2A**
 (the accessible archival profile of PDF 1.7) and **PDF/UA-1** (the universal
 accessibility standard). krilla validates against both while serializing, so a
-successful render is a conformant file — a violation surfaces as a `RenderError`
+successful render is a conformant file - a violation surfaces as a `RenderError`
 rather than a silently broken document.
 
 What that gives you, for free, from the ordinary builder calls:

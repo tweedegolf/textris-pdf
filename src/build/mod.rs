@@ -132,7 +132,7 @@ impl Textris {
     /// Set the creation date written to the PDF metadata, as Unix seconds.
     ///
     /// The renderer otherwise reads the system clock. Pin it to render the same
-    /// document to the same bytes twice, or on targets without a clock — notably
+    /// document to the same bytes twice, or on targets without a clock - notably
     /// `wasm32-unknown-unknown`, where the fallback is the Unix epoch.
     pub fn created_at(&mut self, unix_seconds: i64) -> &mut Self {
         self.doc.created = Some(unix_seconds);
@@ -280,7 +280,7 @@ impl Textris {
     }
 
     /// Add fixed vertical space of `height` points. No inter-block gap is
-    /// added around a spacer, so it *is* the distance between its neighbours —
+    /// added around a spacer, so it *is* the distance between its neighbours -
     /// handy for extra air between sections. Express theme-relative heights
     /// with [`em`](crate::theme::em). For vertical space inside a table cell,
     /// see the [`spacer`] cell helper.
@@ -707,7 +707,7 @@ impl Textris {
     /// line it starts at, in ascending order.
     ///
     /// Combined with [`Layout::block_pages`](crate::layout::Layout::block_pages)
-    /// this maps a position in the source to the page it renders on — what an
+    /// this maps a position in the source to the page it renders on - what an
     /// editor needs to show the page it is editing. Blocks added through the
     /// builder methods rather than parsed from Markdown have no entry, so the
     /// map may be shorter than the document.

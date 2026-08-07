@@ -37,6 +37,7 @@ pub fn layout(document: &Document, fonts: &Fonts) -> Layout {
         outline: engine.outline,
         nodes: engine.structure.next_id,
         block_pages: engine.block_pages,
+        block_tops: engine.block_tops,
     }
 }
 
@@ -128,6 +129,9 @@ struct Engine<'a> {
     outline: Vec<OutlineEntry>,
     /// The page each top-level block started on; see [`Layout::block_pages`].
     block_pages: Vec<usize>,
+    /// Each top-level block's top edge in page space, parallel to
+    /// `block_pages`; see [`Layout::block_tops`].
+    block_tops: Vec<f32>,
 }
 
 impl<'a> Engine<'a> {
@@ -143,16 +147,39 @@ impl<'a> Engine<'a> {
             current_tag: Tagging::Artifact,
             outline: Vec::new(),
             block_pages: Vec::new(),
+            block_tops: Vec::new(),
         }
     }
 
-    /// Record that the next top-level block starts on the current page.
+    /// Record that the next top-level block starts on the current page, at the
+    /// current pen position.
     ///
     /// Called once per element of `Document::blocks`, in order, so the result
     /// stays parallel to it. Blocks nested inside a box are not top-level and
     /// are deliberately not recorded.
     fn record_block_start(&mut self) {
         self.block_pages.push(self.pages.len() - 1);
+        self.block_tops.push(self.y);
+    }
+
+    /// Lay out one top-level block, recording where it starts.
+    ///
+    /// The recording happens before the layout, when the block's own page
+    /// breaks have not run yet. A block that fits nothing on the current page
+    /// therefore gets recorded a page early - so if the layout grew the page
+    /// list without the block drawing anything on the recorded page, the
+    /// record is patched to where the block really landed: the top of the
+    /// next page ([`ensure`](Self::ensure) breaks exactly one page at a time,
+    /// with content following immediately).
+    fn layout_top_level_block(&mut self, block: &Block) {
+        let page = self.pages.len() - 1;
+        let elements = self.pages[page].elements.len();
+        self.record_block_start();
+        self.layout_block(block);
+        if self.pages.len() - 1 > page && self.pages[page].elements.len() == elements {
+            *self.block_pages.last_mut().expect("just recorded") = page + 1;
+            *self.block_tops.last_mut().expect("just recorded") = self.theme.page.content_top();
+        }
     }
 
     /// Width of the current content region.
@@ -238,8 +265,7 @@ impl<'a> Engine<'a> {
             } else {
                 let cur = kind_of(&blocks[i]);
                 self.y += self.gap_before(prev, cur);
-                self.record_block_start();
-                self.layout_block(&blocks[i]);
+                self.layout_top_level_block(&blocks[i]);
                 prev = Some(cur);
                 i += 1;
             }
@@ -467,8 +493,7 @@ impl<'a> Engine<'a> {
             if index > 0 {
                 self.y += self.gap_before(prev, kind_of(block));
             }
-            self.record_block_start();
-            self.layout_block(block);
+            self.layout_top_level_block(block);
             prev = Some(kind_of(block));
         }
         prev.expect("a section is never empty")

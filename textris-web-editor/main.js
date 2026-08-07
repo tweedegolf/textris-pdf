@@ -28,7 +28,7 @@ const FONTS = [
 ];
 
 // pdf.js draws the preview onto per-page canvases, so a re-render can swap
-// each page in only once it is fully drawn — an iframe viewer reloads whole
+// each page in only once it is fully drawn - an iframe viewer reloads whole
 // and blinks. The library and its worker must come from the same release.
 // jsdelivr sends CORS headers, which the worker fetch in `boot` relies on.
 const PDFJS_BASE = "https://cdn.jsdelivr.net/npm/pdfjs-dist@5.7.284";
@@ -69,7 +69,7 @@ let editedLine = null;
  * The pdf.js side of the preview: one `.page` wrapper per page inside
  * `els.preview`, each holding a canvas. Pages are drawn lazily as they scroll
  * into view, and a new document draws into fresh canvases off-DOM, swapping
- * them in only when finished — the old page stays visible in the meantime.
+ * them in only when finished - the old page stays visible in the meantime.
  */
 const preview = {
   doc: null, // the current pdf.js PDFDocumentProxy
@@ -151,6 +151,7 @@ async function boot() {
   }).observe(els.preview);
 
   view.scrollDOM.addEventListener("scroll", onEditorScroll, { passive: true });
+  els.preview.addEventListener("click", onPreviewClick);
   els.levels.addEventListener("input", schedule);
   els.fit.addEventListener("change", rescale);
   els.download.addEventListener("click", download);
@@ -175,6 +176,7 @@ function render() {
       pdf: rendered.pdf,
       lines: rendered.lines,
       pages: rendered.pages,
+      tops: rendered.tops,
       pageCount: rendered.page_count,
     };
     rendered.free();
@@ -202,7 +204,13 @@ async function showPdf(result, docLines, elapsedMs) {
   if (lastBytes && equalBytes(lastBytes, bytes)) {
     // Identical bytes still refresh the map: an edit that moves lines without
     // changing the layout (say, an extra blank line) shifts it.
-    preview.map = { lines: result.lines, pages: result.pages, pageCount: result.pageCount, docLines };
+    preview.map = {
+      lines: result.lines,
+      pages: result.pages,
+      tops: result.tops,
+      pageCount: result.pageCount,
+      docLines,
+    };
     setStatus(`unchanged · ${whereIs(editedLine)} · ${timing}`);
     revealLine(editedLine);
     return;
@@ -223,6 +231,7 @@ async function showPdf(result, docLines, elapsedMs) {
   await setDocument(doc, {
     lines: result.lines,
     pages: result.pages,
+    tops: result.tops,
     pageCount: result.pageCount,
     docLines,
   });
@@ -290,7 +299,7 @@ function onPageVisibility(observed) {
 
 /**
  * Draw one page into a fresh canvas and swap it in. The swap happens only
- * after the draw completes, so the previous rendering stays up throughout —
+ * after the draw completes, so the previous rendering stays up throughout -
  * this is what keeps the preview from blinking. A page drawn at a stale
  * sequence number is simply dropped; whoever bumped the sequence has already
  * queued a replacement.
@@ -363,15 +372,21 @@ function rescale() {
   refreshPages();
 }
 
-// --- scroll sync: the preview follows the editor ---
+// --- sync: the preview follows the editor, a click jumps back ---
 
 let syncScheduled = false;
+
+// Clicking the preview moves the cursor and scrolls the editor along; until
+// this deadline, editor scrolls do not sync back, or the preview would be
+// yanked out from under the click it is answering.
+let suppressSyncUntil = 0;
 
 function onEditorScroll() {
   if (syncScheduled) return;
   syncScheduled = true;
   requestAnimationFrame(() => {
     syncScheduled = false;
+    if (performance.now() < suppressSyncUntil) return;
     if (!preview.map || preview.entries.length === 0) return;
     const top = view.scrollDOM.scrollTop;
     const block = view.lineBlockAtHeight(top);
@@ -381,18 +396,49 @@ function onEditorScroll() {
   });
 }
 
-/**
- * Where a source line lands in the document, as a fractional 0-based page
- * position: 2.5 is halfway down the third page. `preview.map.lines`/`pages`
- * map block starts to pages (ascending by line, so binary search). The map
- * has no positions *within* a page, so the fraction interpolates the line
- * across the page's whole span of source lines — from its first block to the
- * first block of the next page — which assumes lines fill a page evenly.
- * Approximate, but plenty for scrolling along.
+/** Jump the editor cursor to the source of the clicked spot in the preview. */
+function onPreviewClick(event) {
+  if (!preview.map || !preview.baseSize) return;
+  const wrapper = event.target.closest(".page");
+  if (!wrapper) return;
+
+  const rect = wrapper.getBoundingClientRect();
+  const within = Math.min(Math.max((event.clientY - rect.top) / rect.height, 0), 0.999);
+  const line = lineForPagePos(Number(wrapper.dataset.index) + within);
+
+  const doc = view.state.doc;
+  const anchor = doc.line(Math.min(Math.max(line, 1), doc.lines)).from;
+  suppressSyncUntil = performance.now() + 300;
+  view.dispatch({
+    selection: { anchor },
+    effects: EditorView.scrollIntoView(anchor, { y: "center" }),
+  });
+  view.focus();
+}
+
+/*
+ * Both directions of the sync share one anchor map: block i anchors source
+ * line `lines[i]` to the fractional 0-based page position `anchorPos(i)`
+ * (2.5 is halfway down the third page - the block's real top edge, since the
+ * layout reports it in points). Both arrays are ascending, so either side
+ * binary-searches for the last anchor at or before its input and linearly
+ * interpolates toward the next one; the tail runs out at (docLines + 1,
+ * pageCount). Between anchors the interpolation assumes lines are spread
+ * evenly, which is approximate inside a tall block but exact at every block
+ * start.
  */
+
+function anchorPos(i) {
+  const { pages, tops } = preview.map;
+  // A spacer's recorded top can exceed the page height; keep the anchor on
+  // its own page.
+  return pages[i] - 1 + Math.min(tops[i] / preview.baseSize.height, 0.999);
+}
+
+/** Where a source line lands in the document, as a page position. */
 function pagePosForLine(line) {
-  const { lines, pages, pageCount, docLines } = preview.map;
-  if (line === null || lines.length === 0) return 0;
+  const { lines, pageCount, docLines } = preview.map;
+  if (line === null || lines.length === 0 || !preview.baseSize) return 0;
 
   let lo = 0;
   let hi = lines.length - 1;
@@ -410,18 +456,42 @@ function pagePosForLine(line) {
   // the top of the first page.
   if (found === -1) return 0;
 
-  const page = pages[found] - 1;
-  let start = found;
-  while (start > 0 && pages[start - 1] - 1 === page) start--;
-  let end = found + 1;
-  while (end < lines.length && pages[end] - 1 === page) end++;
-
-  const fromLine = lines[start];
-  // Past the last page's blocks, run out toward the end of the document.
-  const toLine = end < lines.length ? lines[end] : docLines + 1;
-  const toPage = end < lines.length ? pages[end] - 1 : pageCount;
+  const fromLine = lines[found];
+  const fromPos = anchorPos(found);
+  const last = found + 1 >= lines.length;
+  const toLine = last ? docLines + 1 : lines[found + 1];
+  const toPos = last ? pageCount : anchorPos(found + 1);
   const frac = toLine > fromLine ? (line - fromLine) / (toLine - fromLine) : 0;
-  return Math.min(page + frac * (toPage - page), pageCount - 0.001);
+  return Math.min(fromPos + frac * (toPos - fromPos), pageCount - 0.001);
+}
+
+/** The mirror image: the source line that lands at a page position. */
+function lineForPagePos(pos) {
+  const { lines, pageCount, docLines } = preview.map;
+  if (lines.length === 0 || !preview.baseSize) return 1;
+
+  let lo = 0;
+  let hi = lines.length - 1;
+  let found = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (anchorPos(mid) <= pos) {
+      found = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  // A click above the first block maps to the first line.
+  if (found === -1) return 1;
+
+  const fromPos = anchorPos(found);
+  const fromLine = lines[found];
+  const last = found + 1 >= lines.length;
+  const toPos = last ? pageCount : anchorPos(found + 1);
+  const toLine = last ? docLines + 1 : lines[found + 1];
+  const frac = toPos > fromPos ? Math.min((pos - fromPos) / (toPos - fromPos), 1) : 0;
+  return Math.min(Math.round(fromLine + frac * (toLine - fromLine)), docLines);
 }
 
 /** `p3/7`-style status text for the page holding `line`. */
@@ -467,7 +537,7 @@ function download() {
  */
 function reportFailure(err) {
   if (err instanceof WebAssembly.RuntimeError) {
-    fail("the renderer panicked — reload the page (details in the console)");
+    fail("the renderer panicked - reload the page (details in the console)");
     console.error(err);
     return;
   }

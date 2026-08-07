@@ -156,6 +156,8 @@ button:not(:disabled):hover {
   margin: 0 auto 16px;
   background: #fff;
   box-shadow: 0 1px 4px rgba(27, 26, 23, 0.25);
+  /* Clicking a page jumps the editor to that spot. */
+  cursor: text;
 }
 
 #preview .page:last-child {

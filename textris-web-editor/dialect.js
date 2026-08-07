@@ -1,7 +1,7 @@
 // Syntax highlighting for the textris-pdf Markdown dialect.
 //
-// The dialect is line-oriented — front matter, attribute lines, directives,
-// headings, table rows — so a `StreamLanguage` tokenizer covers it without a
+// The dialect is line-oriented - front matter, attribute lines, directives,
+// headings, table rows - so a `StreamLanguage` tokenizer covers it without a
 // grammar. The authoritative dialect reference is the module rustdoc at
 // src/markdown/parse.rs; this file only has to *look* right, and deliberately
 // stays lenient: the Rust parser is what decides whether a document is valid.

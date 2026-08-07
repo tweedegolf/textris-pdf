@@ -16,8 +16,8 @@
 //!   layout engine built ([`crate::layout::StructNode`]); page furniture and
 //!   decoration (header/footer, backgrounds, rules, checkboxes) is marked as an
 //!   *artifact* and kept out of the structure tree.
-//! * The structure tree — headings, paragraphs, lists (label + body), tables
-//!   (rows and header/data cells) — is emitted in reading order.
+//! * The structure tree - headings, paragraphs, lists (label + body), tables
+//!   (rows and header/data cells) - is emitted in reading order.
 //! * Document metadata carries a title, language and creation date; a bookmark
 //!   outline is built from the headings.
 //!
@@ -516,7 +516,7 @@ fn system_now() -> time::OffsetDateTime {
     time::OffsetDateTime::now_utc()
 }
 
-/// `wasm32-unknown-unknown` has no clock — reading one panics — so documents
+/// `wasm32-unknown-unknown` has no clock - reading one panics - so documents
 /// that want a real creation date set [`Document::created`].
 #[cfg(target_arch = "wasm32")]
 fn system_now() -> time::OffsetDateTime {

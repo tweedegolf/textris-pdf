@@ -19,7 +19,7 @@ harfrust = "0.12"
 krilla = { version = "0.8", default-features = false }
 # Pinned to whatever `harfrust` depends on: font tables read here are handed
 # straight to the shaper, so a second `read-fonts` version does not type-check.
-read-fonts = "0.41"
+read-fonts = "0.42"
 time = { version = "0.3", default-features = false, features = ["std"] }
 docx-rs = { version = "0.4", optional = true }
 

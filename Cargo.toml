@@ -1,6 +1,6 @@
 [package]
 name = "textris-pdf"
-version = "0.10.0"
+version = "0.10.1"
 license = "MIT"
 edition = "2024"
 description = "Simple but opinionated document generation"
@@ -21,11 +21,11 @@ lto = true
 codegen-units = 1
 
 [dependencies]
-harfrust = "0.12"
+harfrust = "0.13"
 krilla = { version = "0.8", default-features = false }
 # Pinned to whatever `harfrust` depends on: font tables read here are handed
 # straight to the shaper, so a second `read-fonts` version does not type-check.
-read-fonts = "0.41"
+read-fonts = "0.43"
 time = { version = "0.3", default-features = false, features = ["std"] }
 docx-rs = { version = "0.4", optional = true }
 

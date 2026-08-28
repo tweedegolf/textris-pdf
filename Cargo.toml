@@ -1,8 +1,14 @@
 [package]
 name = "textris-pdf"
-version = "0.9.0"
+version = "0.10.0"
 license = "MIT"
 edition = "2024"
+description = "Simple but opinionated document generation"
+repository = "https://github.com/tweedegolf/textris-pdf"
+readme = "README.md"
+keywords = ["pdf", "accessibility", "pdf-ua", "typesetting", "document"]
+categories = ["accessibility", "text-processing", "rendering"]
+exclude = ["/tests", "/docs", "/textris-web-editor", "/.github"]
 
 [workspace]
 members = ["textris-web-editor"]

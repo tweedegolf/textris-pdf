@@ -25,6 +25,16 @@ use crate::{
     theme::{BoxStyle, Theme},
 };
 
+/// Tolerance for "does this fit" checks on `f32` lengths, absorbing the
+/// rounding that creeps in when a bound is derived from the very lengths
+/// compared against it: a column sized to its widest word, a page sized to a
+/// whole number of lines, a height measured in one go but laid out as a
+/// running sum. Without it, content sized to fit exactly can register as a
+/// hair too big and get wrapped, broken or paged needlessly. A hundredth of a
+/// point is far below anything visible, yet well above the drift such
+/// arithmetic accumulates (a few thousandths of a point over a page of lines).
+const FIT_EPSILON: f32 = 0.01;
+
 /// Lay out a whole document, using the document's own [`Theme`], into pages of
 /// drawing primitives plus the logical structure and outline needed to render a
 /// tagged, accessible PDF (see [`Layout`]).
@@ -204,7 +214,7 @@ impl<'a> Engine<'a> {
     /// fresh page could help (we are not already at the top of one).
     fn needs_break(&self, height: f32) -> bool {
         let page = &self.theme.page;
-        self.y + height > page.content_bottom() && self.y > page.content_top()
+        self.y + height > page.content_bottom() + FIT_EPSILON && self.y > page.content_top()
     }
 
     /// Break to a new page if `height` would not fit (see

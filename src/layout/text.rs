@@ -7,14 +7,9 @@ use krilla::{color::rgb, text::KrillaGlyph};
 
 use crate::{
     fonts::Style,
-    layout::{Element, Engine, TextElement},
+    layout::{Element, Engine, FIT_EPSILON, TextElement},
     model::Inline,
 };
-
-/// Tolerance for "does this word fit" checks, absorbing `f32` rounding from
-/// width/inset arithmetic. Without it, a word sized to fit exactly can
-/// register as a hair too wide and get force-broken.
-const WORD_FIT_EPSILON: f32 = 0.0001;
 
 /// What a [`Word`] stands for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -249,7 +244,7 @@ impl Engine<'_> {
         let mut pieces: Vec<(Word, bool)> = Vec::new();
         for word in words {
             // Only text can be split; a fill-in line is atomic.
-            if word.width > max_width + WORD_FIT_EPSILON && word.kind == WordKind::Text {
+            if word.width > max_width + FIT_EPSILON && word.kind == WordKind::Text {
                 for (i, frag) in self
                     .break_word(&word, max_width, size)
                     .into_iter()
@@ -277,7 +272,7 @@ impl Engine<'_> {
             } else {
                 self.fonts.space_width(word.style, size)
             };
-            if !line.is_empty() && width + space + word.width > max_width {
+            if !line.is_empty() && width + space + word.width > max_width + FIT_EPSILON {
                 lines.push(std::mem::take(&mut line));
                 width = word.width;
             } else {
@@ -303,7 +298,7 @@ impl Engine<'_> {
             let mut candidate = current.clone();
             candidate.push(ch);
             let candidate_width = self.fonts.measure(word.style, &candidate, size);
-            if !current.is_empty() && candidate_width > max_width {
+            if !current.is_empty() && candidate_width > max_width + FIT_EPSILON {
                 fragments.push(self.shape_word(word.style, word.color, &current, size));
                 current = ch.to_string();
             } else {

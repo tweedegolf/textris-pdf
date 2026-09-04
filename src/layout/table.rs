@@ -9,7 +9,7 @@ use krilla::{color::rgb, tagging::TableHeaderScope};
 use crate::{
     fonts::Style,
     layout::{
-        Element, Engine, StructTag, Tagging,
+        Element, Engine, FIT_EPSILON, StructTag, Tagging,
         text::{Word, WordKind},
     },
     model::{Cell, Table},
@@ -103,7 +103,7 @@ impl Engine<'_> {
             - header_height.unwrap_or(0.0);
         let min_fragment = self.table_font_size(style) * self.theme.spacing.line_height
             + 2.0 * self.theme.table.inset_y;
-        let first_keep = if first_row > page_capacity {
+        let first_keep = if first_row > page_capacity + FIT_EPSILON {
             min_fragment
         } else {
             first_row
@@ -149,7 +149,7 @@ impl Engine<'_> {
         let header_height = table
             .has_header()
             .then(|| self.row_height(&table.headers, &widths, columns, &header_style));
-        let header_splits = header_height.is_some_and(|height| height > page_height);
+        let header_splits = header_height.is_some_and(|height| height > page_height + FIT_EPSILON);
         let repeat_header_tags = vec![Tagging::Artifact; columns];
         let repeat_header = header_height
             .filter(|_| !header_splits)
@@ -214,7 +214,7 @@ impl Engine<'_> {
             // taller one splits across pages, so it only needs room for its
             // first fragment here.
             let height = self.row_height(row, &widths, columns, &row_style);
-            let splits = height > page_capacity;
+            let splits = height > page_capacity + FIT_EPSILON;
             if self.needs_break(if splits { min_fragment } else { height }) {
                 self.new_page();
                 if let Some(header) = &repeat_header {
@@ -588,12 +588,13 @@ impl Engine<'_> {
             // caller starting the row too low overflows a little instead of
             // never making progress.
             let avail = (self.theme.page.content_bottom() - self.y - 2.0 * inset_y).max(line_h);
-            let take = ((avail / line_h) as usize).min(total_lines - cursor);
+            let take = (((avail + FIT_EPSILON) / line_h) as usize).min(total_lines - cursor);
             // Beyond its lines, a fragment grows toward any outstanding
             // minimum content (a spacer cell, the style's row minimum),
             // clamped to the page.
             let content_h = (take as f32 * line_h).max((min_content - consumed).clamp(0.0, avail));
-            let last = cursor + take == total_lines && consumed + content_h >= min_content - 0.01;
+            let last =
+                cursor + take == total_lines && consumed + content_h >= min_content - FIT_EPSILON;
 
             let top = self.y;
             let height = content_h + 2.0 * inset_y;

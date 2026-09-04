@@ -1801,3 +1801,142 @@ fn block_start_is_patched_past_a_break_inside_the_block() {
         document.theme.page.content_top()
     );
 }
+
+/// Multi-word phrases of 2 to 7 words drawn from a pool, so a fit check that
+/// only misfires for some word-width sums gets plenty of chances to do so.
+fn header_phrases() -> Vec<String> {
+    let pool = [
+        "auto",
+        "columns",
+        "shouldn't",
+        "wrap",
+        "priority",
+        "level",
+        "final",
+        "score",
+        "strike",
+        "duration",
+        "cavitation",
+        "bubble",
+        "impact",
+        "force",
+        "measurement",
+        "value",
+        "sequence",
+        "number",
+        "habitat",
+        "depth",
+        "specimen",
+        "record",
+        "category",
+        "count",
+        "row",
+        "status",
+        "outcome",
+        "total",
+        "rank",
+        "position",
+    ];
+    let mut phrases = Vec::new();
+    for len in 2..=7 {
+        for start in (0..pool.len() - len).step_by(3) {
+            phrases.push(pool[start..start + len].join(" "));
+        }
+    }
+    phrases
+}
+
+#[test]
+fn auto_column_at_its_natural_width_keeps_its_header_on_one_line() {
+    let fonts = test_fonts();
+    // A custom spec's Auto column gets exactly its natural width (its widest
+    // unwrapped line plus the insets), so its header must come out as one
+    // line: one merged text run equal to the whole header.
+    for size in [7.0, 8.5, 9.0, 10.0, 11.0, 12.5, 14.0] {
+        let style = TableStyle {
+            columns: ColumnWidths::custom([ColumnWidth::Auto, ColumnWidth::Fraction(1)]),
+            font_size: Some(size),
+            ..TableStyle::data()
+        };
+        for header in header_phrases() {
+            let mut doc = Textris::new();
+            doc.table_styled(&style, [header.as_str(), "value"], Vec::<[&str; 2]>::new());
+            let pages = layout(&doc.build(), &fonts);
+            assert!(
+                texts(&pages[0]).iter().any(|t| t.text == header),
+                "{header:?} at {size}pt wrapped inside its natural-width column"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_paragraph_that_exactly_fills_the_page_stays_on_one_page() {
+    let fonts = test_fonts();
+    for size in [8.0, 9.0, 10.0, 10.5, 11.0, 12.0] {
+        for lines in 2..=60usize {
+            for margin in [50.0, 60.0, 70.866, 85.039] {
+                let mut theme = Theme::default();
+                theme.font_size.body = size;
+                theme.page.margin_y = margin;
+                // The content box is exactly `lines` line boxes tall.
+                let line_h = size * theme.spacing.line_height;
+                theme.page.height = 2.0 * margin + lines as f32 * line_h;
+                let mut doc = Textris::with_theme(theme);
+                doc.paragraph(vec!["x"; lines].join("\n"));
+                let pages = layout(&doc.build(), &fonts);
+                assert_eq!(
+                    pages.len(),
+                    1,
+                    "{lines} lines of {size}pt (margin {margin}) spilled onto a second page"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn table_rows_sized_to_the_page_fill_it_exactly() {
+    let fonts = test_fonts();
+    for size in [8.0, 9.0, 10.0, 11.0, 12.0] {
+        for lines in 3..=40usize {
+            // No header row, so the page capacity is the whole content box.
+            let style = TableStyle {
+                header: false,
+                font_size: Some(size),
+                ..TableStyle::data()
+            };
+            let mut theme = Theme::default();
+            let line_h = size * theme.spacing.line_height;
+            // The content box holds exactly `lines` lines plus the cell insets.
+            theme.page.height =
+                2.0 * theme.page.margin_y + lines as f32 * line_h + 2.0 * theme.table.inset_y;
+
+            // A row exactly a page tall stays whole on one page.
+            let mut doc = Textris::with_theme(theme.clone());
+            doc.table_styled(&style, Vec::<&str>::new(), [[vec!["x"; lines].join("\n")]]);
+            let pages = layout(&doc.build(), &fonts);
+            assert_eq!(
+                pages.len(),
+                1,
+                "a {lines}-line row of {size}pt filling the page was split"
+            );
+
+            // A row twice that tall splits into exactly two page-filling
+            // fragments, not a full page, a short one and a leftover line.
+            let mut doc = Textris::with_theme(theme);
+            doc.table_styled(
+                &style,
+                Vec::<&str>::new(),
+                [[vec!["x"; 2 * lines].join("\n")]],
+            );
+            let pages = layout(&doc.build(), &fonts);
+            assert_eq!(
+                pages.len(),
+                2,
+                "a {}-line row of {size}pt should split into two full pages",
+                2 * lines
+            );
+        }
+    }
+}

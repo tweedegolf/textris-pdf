@@ -338,6 +338,60 @@ fn custom_column_widths_honor_absolute_and_split_fractions() {
 }
 
 #[test]
+fn auto_column_header_words_survive_content_width_scaling() {
+    let fonts = test_fonts();
+    let style = TableStyle {
+        columns: ColumnWidths::custom([
+            ColumnWidth::Auto,
+            ColumnWidth::Fraction(1),
+            ColumnWidth::Auto,
+        ]),
+        ..TableStyle::data()
+    };
+
+    let auto_headers = [
+        ("auto columns", "shouldn't wrap"),
+        ("index", "score"),
+        ("smasher", "max length"),
+        ("priority level", "final score"),
+        ("row number", "status"),
+        ("spearer", "notes"),
+        ("club", "strike duration"),
+        ("id", "outcome value"),
+        ("habitat", "cavitation bubble"),
+        ("rank", "total"),
+        ("position", "result"),
+        ("burrow", "impact force"),
+        ("sequence number", "summary"),
+        ("entry id", "measurement value"),
+        ("specimen", "depth"),
+        ("record", "category count"),
+        ("item index", "final value"),
+    ];
+    let col1 = "full category description text";
+
+    for (col0, col2) in auto_headers {
+        let mut doc = Textris::new();
+        doc.table_styled(&style, [col0, col1, col2], Vec::<[&str; 3]>::new());
+        let pages = layout(&doc.build(), &fonts);
+
+        // Every drawn fragment must be one of the headers whole, or one of
+        // their individual words, anything else is a mid-word break
+        let allowed: std::collections::HashSet<&str> = [col0, col1, col2]
+            .into_iter()
+            .flat_map(|h| h.split(' ').chain([h]))
+            .collect();
+        for text in texts(&pages[0]) {
+            assert!(
+                allowed.contains(text.text.as_str()),
+                "{col0:?} / {col2:?}: fragment {:?} looks like a mid-word break",
+                text.text
+            );
+        }
+    }
+}
+
+#[test]
 fn column_alignment_places_cell_text_left_center_and_right() {
     use crate::{
         fonts::Style,

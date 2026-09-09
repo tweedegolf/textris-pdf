@@ -1,6 +1,6 @@
 [package]
 name = "textris-pdf"
-version = "0.10.2"
+version = "0.10.3"
 license = "MIT"
 edition = "2024"
 description = "Simple but opinionated document generation"
@@ -27,7 +27,7 @@ krilla = { version = "0.8", default-features = false }
 # straight to the shaper, so a second `read-fonts` version does not type-check.
 read-fonts = "0.43"
 time = { version = "0.3", default-features = false, features = ["std"] }
-docx-rs = { version = "0.4", optional = true }
+docx-rs = { version = "0.4", default-features = false, optional = true }
 
 [features]
 default = ["markdown", "markdown-parser"]

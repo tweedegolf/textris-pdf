@@ -391,12 +391,23 @@ impl Engine<'_> {
                 }
 
                 // Absolute and minimum widths may claim more than the page;
-                // scale everything down proportionally so the table never
-                // overflows horizontally.
+                // scale columns down, preferably the ones with slack, so
+                // the table never overflows horizontally.
                 let used: f32 = widths.iter().sum();
                 if used > total && used > 0.0 {
-                    for width in &mut widths {
-                        *width *= total / used;
+                    let floor: Vec<f32> = (0..columns).map(|c| widths[c].min(min[c])).collect();
+                    let floor_total: f32 = floor.iter().sum();
+                    let slack_total = used - floor_total;
+                    if floor_total < total && slack_total > 0.0 {
+                        let excess = used - total;
+                        for c in 0..columns {
+                            widths[c] -= excess * (widths[c] - floor[c]) / slack_total;
+                        }
+                    } else {
+                        // No slack anywhere, fall back to a uniform scale
+                        for width in &mut widths {
+                            *width *= total / used;
+                        }
                     }
                 }
 

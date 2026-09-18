@@ -392,6 +392,55 @@ fn auto_column_header_words_survive_content_width_scaling() {
 }
 
 #[test]
+fn auto_columns_keep_their_minimum_width_when_a_cell_overflows() {
+    let fonts = test_fonts();
+    let theme = Theme::default();
+    let engine = Engine::new(&fonts, &theme);
+    let style = TableStyle {
+        columns: ColumnWidths::custom([
+            ColumnWidth::Auto,
+            ColumnWidth::Fraction(1),
+            ColumnWidth::Auto,
+        ]),
+        ..TableStyle::data()
+    };
+
+    let overflowing_words = [
+        "The-mantis-shrimp-Stomatopoda-Malacostraca-crustaceans-trinocular-depth-perception-circular-polarised-light",
+        "Odontodactylus-scyllarus-peacock-mantis-shrimp-smasher-appendage-acceleration-cavitation-bubble-collapse",
+        "Gonodactylus-smithii-spearer-burrow-defended-territory-aggressive-visual-signal-display-behaviour-noted-daily",
+        "Lysiosquillina-maculata-zebra-mantis-shrimp-monogamous-pair-bonding-burrow-sharing-lifetime-partnership",
+        "Hemisquilla-californiensis-giant-mantis-shrimp-bioluminescent-fluorescent-carapace-markings-detected-clearly",
+    ];
+
+    for word in overflowing_words {
+        let mut doc = Textris::new();
+        doc.table_styled(
+            &style,
+            ["index", "name", "final score value"],
+            [["123", word, "12345"]],
+        );
+        let d = doc.build();
+        let crate::model::Block::Table(t) = &d.blocks[0] else {
+            panic!("expected a table");
+        };
+        let total = theme.page.content_width();
+        let widths = engine.column_widths(t, t.columns(), total);
+
+        // Auto columns must stay wide enough to hold their widest word
+        for col in [0, 2] {
+            let (min_content_width, _) = engine.column_metrics(t, col);
+            assert!(
+                widths[col] >= min_content_width + 2.0 * theme.table.inset_x - 0.01,
+                "{word:?}: column {col} ({}) should fit its own widest word (min {})",
+                widths[col],
+                min_content_width + 2.0 * theme.table.inset_x
+            );
+        }
+    }
+}
+
+#[test]
 fn column_alignment_places_cell_text_left_center_and_right() {
     use crate::{
         fonts::Style,

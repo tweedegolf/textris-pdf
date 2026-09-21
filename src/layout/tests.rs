@@ -441,6 +441,115 @@ fn auto_columns_keep_their_minimum_width_when_a_cell_overflows() {
 }
 
 #[test]
+fn cap_widest_to_fit_caps_only_the_widest_columns() {
+    use super::table::cap_widest_to_fit;
+
+    // One oversized column absorbs the whole overflow.
+    let mut widths = [10.0, 90.0, 300.0];
+    cap_widest_to_fit(&mut widths, 250.0);
+    assert_eq!(widths, [10.0, 90.0, 150.0]);
+
+    // Two oversized columns meet at a common cap; the narrow one is untouched.
+    let mut widths = [10.0, 200.0, 300.0];
+    cap_widest_to_fit(&mut widths, 250.0);
+    assert_eq!(widths, [10.0, 120.0, 120.0]);
+
+    // Widths that already fit are left alone.
+    let mut widths = [10.0, 20.0];
+    cap_widest_to_fit(&mut widths, 100.0);
+    assert_eq!(widths, [10.0, 20.0]);
+
+    // A total narrower than every column caps them all equally, never below zero.
+    let mut widths = [30.0, 40.0];
+    cap_widest_to_fit(&mut widths, 20.0);
+    assert_eq!(widths, [10.0, 10.0]);
+    let mut widths = [30.0, 40.0];
+    cap_widest_to_fit(&mut widths, -5.0);
+    assert_eq!(widths, [0.0, 0.0]);
+}
+
+/// A table whose every column is index-like except one holding an unbreakable
+/// word wider than the page. Only that column may be squeezed below its
+/// minimum; the others keep their widest word on one line.
+fn oversized_word_table(style: &TableStyle) -> crate::model::Table {
+    let long = "https://example.org/gemeente/s-gravenhage/inwoners/lijst-2026-definitief-versie-3-goedgekeurd-door-de-raad.pdf";
+    let mut doc = Textris::new();
+    doc.table_styled(
+        style,
+        ["", "name", "initials", "born", "town"],
+        [
+            [
+                "29",
+                "de Jong",
+                "M. (Marianne) (v)",
+                "22-04-1952",
+                "Utrecht",
+            ],
+            [
+                "30",
+                "Jansses",
+                "J. (Joop) (m)",
+                "27-07-1989",
+                "'s-Gravenhage",
+            ],
+            ["44", "Leijtes", "L. (Leroy) (m)", "25-02-2001", long],
+        ],
+    );
+    let d = doc.build();
+    let crate::model::Block::Table(t) = &d.blocks[0] else {
+        panic!("expected a table");
+    };
+    t.clone()
+}
+
+#[test]
+fn oversized_word_squeezes_only_its_own_column() {
+    let fonts = test_fonts();
+    let theme = Theme::default();
+    let engine = Engine::new(&fonts, &theme);
+    let pad = 2.0 * theme.table.inset_x;
+    let total = theme.page.content_width();
+
+    let styles = [
+        TableStyle::data(),
+        TableStyle {
+            columns: ColumnWidths::custom([
+                ColumnWidth::Auto,
+                ColumnWidth::Fraction(1),
+                ColumnWidth::Fraction(1),
+                ColumnWidth::Fraction(1),
+                ColumnWidth::Fraction(1),
+            ]),
+            ..TableStyle::data()
+        },
+    ];
+    for style in styles {
+        let t = oversized_word_table(&style);
+        let widths = engine.column_widths(&t, t.columns(), total);
+
+        let sum: f32 = widths.iter().sum();
+        assert!(
+            (sum - total).abs() < 0.01,
+            "{style:?}: columns sum to {sum}, not {total}"
+        );
+
+        for (c, &width) in widths.iter().enumerate().take(4) {
+            let (min, _) = engine.column_metrics(&t, c);
+            assert!(
+                width >= min + pad - FIT_EPSILON,
+                "{style:?}: column {c} ({width}) squeezed below its widest word ({})",
+                min + pad
+            );
+        }
+        let (min, _) = engine.column_metrics(&t, 4);
+        assert!(
+            widths[4] < min + pad,
+            "{style:?}: the oversized column must give"
+        );
+    }
+}
+
+#[test]
 fn column_alignment_places_cell_text_left_center_and_right() {
     use crate::{
         fonts::Style,

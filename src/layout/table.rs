@@ -45,6 +45,35 @@ struct HeaderRepeat<'a> {
     tags: &'a [Tagging],
 }
 
+/// Shrink `widths` to sum to `total` by capping the widest columns first.
+///
+/// Finds the cap that, applied to every column above it, brings the sum down to
+/// `total`; columns already narrower than the cap keep their width. Widths
+/// that already fit are left alone.
+pub(super) fn cap_widest_to_fit(widths: &mut [f32], total: f32) {
+    let sum: f32 = widths.iter().sum();
+    if widths.is_empty() || sum <= total {
+        return;
+    }
+    let mut order: Vec<usize> = (0..widths.len()).collect();
+    order.sort_by(|&a, &b| widths[b].total_cmp(&widths[a]));
+
+    // Try capping the `k` widest columns; the cap is valid once it is no
+    // narrower than the widest column left uncapped.
+    let mut rest = sum;
+    for k in 1..=order.len() {
+        rest -= widths[order[k - 1]];
+        let cap = (total - rest) / k as f32;
+        let next = order.get(k).map_or(f32::NEG_INFINITY, |&c| widths[c]);
+        if cap >= next {
+            for &c in &order[..k] {
+                widths[c] = cap.max(0.0);
+            }
+            return;
+        }
+    }
+}
+
 impl Engine<'_> {
     /// The font size for a table's cells: its style override, or the theme body size.
     fn table_font_size(&self, style: &TableStyle) -> f32 {
@@ -342,9 +371,13 @@ impl Engine<'_> {
                         .collect();
                 }
 
-                // Even the minimum widths overflow the page; scale them down
-                // proportionally and let content wrap or hard-break.
-                (0..columns).map(|c| min[c] * total / min_total).collect()
+                // Even the minimum widths overflow the page. Cap the widest
+                // columns first: they hold the oversized words and have to
+                // hard-break anyway, while narrow columns (an index, a date)
+                // keep their minimum and stay on one line.
+                let mut widths = min;
+                cap_widest_to_fit(&mut widths, total);
+                widths
             }
             ColumnWidths::Custom(specs) => {
                 let pad = 2.0 * self.theme.table.inset_x;
@@ -404,10 +437,10 @@ impl Engine<'_> {
                             widths[c] -= excess * (widths[c] - floor[c]) / slack_total;
                         }
                     } else {
-                        // No slack anywhere, fall back to a uniform scale
-                        for width in &mut widths {
-                            *width *= total / used;
-                        }
+                        // The floors alone overflow: drop every column to its
+                        // floor, then cap the widest columns until it fits.
+                        widths = floor;
+                        cap_widest_to_fit(&mut widths, total);
                     }
                 }
 

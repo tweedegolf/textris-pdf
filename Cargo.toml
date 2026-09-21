@@ -1,6 +1,6 @@
 [package]
 name = "textris-pdf"
-version = "0.10.3"
+version = "0.10.4"
 license = "MIT"
 edition = "2024"
 description = "Simple but opinionated document generation"

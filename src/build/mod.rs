@@ -25,6 +25,26 @@
 //! # let _ = pdf;
 //! ```
 //!
+//! ## Several documents in one PDF
+//!
+//! A [`Bundle`] appends whole documents, each with its own chrome, theme, page
+//! numbering and section numbering, into a single PDF file:
+//!
+//! ```no_run
+//! use textris_pdf::build::{Bundle, Textris};
+//! use textris_pdf::fonts::Fonts;
+//!
+//! let fonts = Fonts::from_variable_files("regular.ttf", "italic.ttf", "mono.ttf").unwrap();
+//! let (report, appendix) = (Textris::new(), Textris::new());
+//! // ... fill both as usual; each gets its own header, footer and page counter.
+//!
+//! let mut bundle = Bundle::new();
+//! bundle.title("Annual report, with appendix");
+//! bundle.push(report).push(appendix);
+//! let pdf = bundle.render(&fonts);
+//! # let _ = pdf;
+//! ```
+//!
 //! ## Rich text
 //!
 //! Anywhere a method takes text it accepts [`IntoText`]: a plain `&str`/`String`
@@ -54,7 +74,7 @@ use std::{io, path::Path};
 use crate::{
     fonts::Fonts,
     model::{Block, Cell, Chrome, Document, Inline, ListMarker, SectionContent, Table, TaskItem},
-    render::RenderError,
+    render::{Part, PdfMetadata, RenderError},
     theme::{BoxStyle, TableStyle, Theme},
 };
 
@@ -727,6 +747,156 @@ impl Textris {
     }
 }
 
+impl From<Textris> for Document {
+    /// The assembled document with its section numbering resolved: the same
+    /// as [`Textris::build`].
+    fn from(builder: Textris) -> Self {
+        builder.build()
+    }
+}
+
+impl From<&Textris> for Document {
+    /// A resolved copy of the document built so far, leaving the builder
+    /// untouched; see [`Textris::build`].
+    fn from(builder: &Textris) -> Self {
+        builder.clone().build()
+    }
+}
+
+/// Several documents appended into one PDF, in order.
+///
+/// Each document keeps everything it dictates itself: its [`Theme`] (so page
+/// sizes may differ), its running header and footer, its page counter (which
+/// restarts at 1 and whose total is that document's own page count) and its
+/// section numbering, exactly as if it had been rendered on its own. Only what
+/// a PDF file has one of - the title, language and creation date written to
+/// the metadata - is set on the bundle; a field left unset there falls back to
+/// the first document's, and then to the renderer's usual defaults (the first
+/// heading, `"en"`, the system clock).
+///
+/// Push documents as finished [`Textris`] builders (by value or by reference)
+/// or as bare [`Document`]s; section numbering is resolved per document, so
+/// numbered headings count from 1 in each. Then [`render`](Self::render):
+///
+/// ```no_run
+/// # use textris_pdf::build::{Bundle, Textris};
+/// # use textris_pdf::fonts::Fonts;
+/// # let fonts = Fonts::from_variable_files("regular.ttf", "italic.ttf", "mono.ttf").unwrap();
+/// let mut report = Textris::new();
+/// report.h1("Report").footer_right("Report page");
+/// let mut appendix = Textris::new();
+/// appendix.h1("Appendix").footer_right("Appendix page");
+///
+/// let mut bundle = Bundle::new();
+/// bundle.title("Report with appendix").language("en");
+/// bundle.push(report).push(appendix);
+/// bundle.render_to_file("out.pdf", &fonts).unwrap();
+/// ```
+///
+/// In the PDF's accessibility structure each document becomes a `Part` under
+/// the document root, and the bookmark outline nests each document's headings
+/// on their own. For the lower-level entry point that takes already laid-out
+/// documents, see [`render_many`](crate::render::render_many).
+#[derive(Debug, Default, Clone)]
+pub struct Bundle {
+    documents: Vec<Document>,
+    metadata: PdfMetadata,
+}
+
+impl Bundle {
+    /// An empty bundle. Rendering it without any documents is an error
+    /// ([`RenderError::NoDocuments`]).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the title of the combined PDF (see [`Textris::title`]). Falls back
+    /// to the first document's title when unset.
+    pub fn title(&mut self, title: impl Into<String>) -> &mut Self {
+        self.metadata.title = Some(title.into());
+        self
+    }
+
+    /// Set the language of the combined PDF (see [`Textris::language`]). Falls
+    /// back to the first document's language when unset.
+    pub fn language(&mut self, language: impl Into<String>) -> &mut Self {
+        self.metadata.language = Some(language.into());
+        self
+    }
+
+    /// Set the creation date of the combined PDF, as Unix seconds (see
+    /// [`Textris::created_at`]). Falls back to the first document's when unset.
+    pub fn created_at(&mut self, unix_seconds: i64) -> &mut Self {
+        self.metadata.created = Some(unix_seconds);
+        self
+    }
+
+    /// Append a document. Accepts a [`Textris`] builder by value or by
+    /// reference (its sections are resolved as by [`Textris::build`]) or a
+    /// bare [`Document`].
+    pub fn push(&mut self, document: impl Into<Document>) -> &mut Self {
+        self.documents.push(document.into());
+        self
+    }
+
+    /// The documents appended so far, in order.
+    pub fn documents(&self) -> &[Document] {
+        &self.documents
+    }
+
+    /// The metadata set on the bundle itself, before any fallback.
+    pub fn metadata(&self) -> &PdfMetadata {
+        &self.metadata
+    }
+
+    /// Lay out every document and render them, appended in order, into one
+    /// tagged, accessible PDF/A-2A + PDF/UA-1 file.
+    pub fn render(&self, fonts: &Fonts) -> Result<Vec<u8>, RenderError> {
+        let documents: Vec<Document> = self
+            .documents
+            .iter()
+            .map(|document| {
+                // Idempotent, so a document that arrived resolved is unchanged.
+                let mut document = document.clone();
+                document.resolve_sections();
+                document
+            })
+            .collect();
+        let layouts: Vec<_> = documents
+            .iter()
+            .map(|document| crate::layout::layout(document, fonts))
+            .collect();
+        let parts: Vec<Part<'_>> = layouts
+            .iter()
+            .zip(&documents)
+            .map(|(layout, document)| Part { layout, document })
+            .collect();
+        let fallback = documents.first().map(PdfMetadata::from).unwrap_or_default();
+        let metadata = self.metadata.clone().or(&fallback);
+        crate::render::render_many(&parts, &metadata, fonts)
+    }
+
+    /// Render the bundle and write the PDF to `path`.
+    pub fn render_to_file(&self, path: impl AsRef<Path>, fonts: &Fonts) -> io::Result<()> {
+        let pdf = self.render(fonts).map_err(io::Error::other)?;
+        std::fs::write(path, pdf)
+    }
+}
+
+impl<D: Into<Document>> Extend<D> for Bundle {
+    fn extend<I: IntoIterator<Item = D>>(&mut self, documents: I) {
+        self.documents.extend(documents.into_iter().map(Into::into));
+    }
+}
+
+impl<D: Into<Document>> FromIterator<D> for Bundle {
+    fn from_iter<I: IntoIterator<Item = D>>(documents: I) -> Self {
+        let mut bundle = Self::new();
+        bundle.extend(documents);
+        bundle
+    }
+}
+
 /// A table under construction, handed to the closure of [`Textris::table_with`].
 ///
 /// Defaults to [`TableStyle::data`]; call [`style`](Self::style) to use another.
@@ -902,6 +1072,36 @@ mod tests {
         };
         assert!(items[0].checked);
         assert!(!items[1].checked);
+    }
+
+    #[test]
+    fn bundle_resolves_section_numbering_per_document() {
+        let mut first = Textris::new();
+        first.h3_numbered("Intro").h3_numbered("Body");
+        let mut second = Textris::new();
+        second.h3_numbered("Intro");
+
+        let bundle: Bundle = [first, second].into_iter().collect();
+        let heading = |doc: usize, block: usize| match &bundle.documents()[doc].blocks[block] {
+            Block::Heading { content, .. } => plain_text(content),
+            _ => panic!("expected a heading"),
+        };
+        assert_eq!(heading(0, 0), "1. Intro");
+        assert_eq!(heading(0, 1), "2. Body");
+        assert_eq!(heading(1, 0), "1. Intro", "numbering restarts per document");
+    }
+
+    #[test]
+    fn bundle_accepts_builders_by_value_by_reference_and_bare_documents() {
+        let by_value = Textris::new();
+        let by_reference = Textris::new();
+        let mut bundle = Bundle::new();
+        bundle
+            .push(by_value)
+            .push(&by_reference)
+            .push(Document::default());
+        assert_eq!(bundle.documents().len(), 3);
+        assert_eq!(bundle.metadata(), &PdfMetadata::default());
     }
 
     #[test]

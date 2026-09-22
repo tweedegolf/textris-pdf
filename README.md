@@ -134,6 +134,40 @@ Header and footer sections additionally accept
 `SectionContent::page_counter(|page, total| …)` for a `Page N of M` counter,
 filled in once the total page count is known.
 
+To append several documents into one PDF, each with its own chrome and
+numbering, see [Several documents in one PDF](#several-documents-in-one-pdf).
+
+## Several documents in one PDF
+
+A [`Bundle`](src/build/mod.rs) appends whole documents into a single PDF file.
+Each document keeps everything it dictates itself: its theme (so page sizes
+may differ), its running header and footer, its page counter, which restarts
+at 1 with that document's own page count as the total, and its section
+numbering, which also counts from 1 again. Only what a file has one of, the
+title, language and creation date in the PDF metadata, is set on the bundle;
+left unset, it falls back to the first document's.
+
+```rust
+use textris_pdf::build::{Bundle, Textris};
+
+let mut report = Textris::new();
+report.h1("Report").footer_right("Report page");   // fill as usual
+let mut appendix = Textris::new();
+appendix.h1("Appendix").footer_right("Appendix page");
+
+let mut bundle = Bundle::new();
+bundle.title("Report with appendix").language("en");
+bundle.push(report).push(appendix);           // Textris by value or reference, or a Document
+bundle.render_to_file("out.pdf", &fonts)?;
+```
+
+In the tagged output each document becomes a `Part` of the structure tree, and
+the bookmark outline nests each document's headings on their own. Code that
+walks the pipeline by hand (as the web editor does, for its source map) can use
+[`render::render_many`](src/render.rs), which takes already laid-out documents
+plus a [`PdfMetadata`](src/render.rs). `tests/bundle.rs` exercises the whole
+feature and writes `tests/bundle-example.pdf` for inspection.
+
 ## Markdown, docx
 
 Besides the PDF pipeline there are structural exports, and a Markdown *input*

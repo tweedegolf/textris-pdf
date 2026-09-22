@@ -5,6 +5,10 @@
 //! draws the running header and footer (which depend on the total page count
 //! and therefore cannot be produced during layout).
 //!
+//! [`render`] paints one document; [`render_many`] appends several laid-out
+//! documents into a single PDF, each keeping its own theme, chrome and page
+//! numbering (see [`crate::build::Bundle`] for the builder-level API).
+//!
 //! ## Accessibility
 //!
 //! The output conforms to **PDF/A-2A** (the accessible archival profile of PDF
@@ -61,6 +65,8 @@ pub enum RenderError {
     /// krilla failed to serialize the document, most commonly a validation
     /// failure against the PDF/A-2A or PDF/UA-1 profile.
     Serialize(KrillaError),
+    /// [`render_many`] was given no documents; a PDF needs at least one page.
+    NoDocuments,
 }
 
 impl fmt::Display for RenderError {
@@ -70,11 +76,64 @@ impl fmt::Display for RenderError {
                 write!(f, "invalid page size: {width} x {height} pt")
             }
             Self::Serialize(error) => write!(f, "failed to serialize PDF: {error}"),
+            Self::NoDocuments => write!(f, "no documents to render"),
         }
     }
 }
 
 impl std::error::Error for RenderError {}
+
+/// The document-level metadata written to the PDF: the title and language
+/// (both required by PDF/UA) and the creation date (required by PDF/A).
+///
+/// Every field is optional and falls back the same way as the fields of
+/// [`Document`] it mirrors: the title to the first heading in the output, the
+/// language to `"en"`, the date to the system clock. [`render`] takes them
+/// from the document itself (see [`From<&Document>`](#impl-From<%26Document>-for-PdfMetadata));
+/// [`render_many`] takes them explicitly, because a PDF that appends several
+/// documents has exactly one title.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PdfMetadata {
+    /// See [`Document::title`].
+    pub title: Option<String>,
+    /// See [`Document::language`].
+    pub language: Option<String>,
+    /// See [`Document::created`].
+    pub created: Option<i64>,
+}
+
+impl PdfMetadata {
+    /// Fill every unset field from `fallback`.
+    pub fn or(self, fallback: &Self) -> Self {
+        Self {
+            title: self.title.or_else(|| fallback.title.clone()),
+            language: self.language.or_else(|| fallback.language.clone()),
+            created: self.created.or(fallback.created),
+        }
+    }
+}
+
+impl From<&Document> for PdfMetadata {
+    fn from(document: &Document) -> Self {
+        Self {
+            title: document.title.clone(),
+            language: document.language.clone(),
+            created: document.created,
+        }
+    }
+}
+
+/// One laid-out document to paint, for [`render_many`].
+///
+/// `layout` must be the result of [`layout`](crate::layout::layout) for this
+/// same `document` (and the same fonts the renderer is given): the structure
+/// tree indexes into node ids allocated during layout, and a mismatched pair
+/// panics.
+#[derive(Debug, Clone, Copy)]
+pub struct Part<'a> {
+    pub layout: &'a Layout,
+    pub document: &'a Document,
+}
 
 /// Render a laid-out document plus its chrome into tagged PDF/A-2A + PDF/UA-1
 /// bytes.
@@ -83,6 +142,40 @@ impl std::error::Error for RenderError {}
 /// same `document` (and the same `fonts`): the structure tree indexes into
 /// node ids allocated during layout, and a mismatched pair panics.
 pub fn render(layout: &Layout, document: &Document, fonts: &Fonts) -> Result<Vec<u8>, RenderError> {
+    render_many(
+        &[Part { layout, document }],
+        &PdfMetadata::from(document),
+        fonts,
+    )
+}
+
+/// Render several laid-out documents, appended in order, into one tagged
+/// PDF/A-2A + PDF/UA-1 file.
+///
+/// Every document keeps what it dictates itself: its pages are painted with
+/// its own [`Theme`] (so page sizes may differ), its running header and footer
+/// appear on its pages only, and a page counter in its chrome counts *its*
+/// pages - restarting at 1 and with a total equal to that document's page
+/// count, exactly as if it had been rendered on its own. Section numbering is
+/// resolved per document before layout, so it restarts as well.
+///
+/// What the file has only one of is provided by `metadata`: the title,
+/// language and creation date (each falling back as described on
+/// [`PdfMetadata`]). In the structure tree each document becomes a `Part`
+/// under the implicit document root, and the bookmark outline nests each
+/// document's headings on their own, so a document that opens with a
+/// subheading is not filed under the previous document's title. Rendering a
+/// single part is exactly [`render`]: no `Part` wrapper is added.
+///
+/// Returns [`RenderError::NoDocuments`] for an empty `parts`.
+pub fn render_many(
+    parts: &[Part<'_>],
+    metadata: &PdfMetadata,
+    fonts: &Fonts,
+) -> Result<Vec<u8>, RenderError> {
+    if parts.is_empty() {
+        return Err(RenderError::NoDocuments);
+    }
     let configuration = ConfigurationBuilder::new()
         .with_archival_validator(Archival::A2_A)
         .with_accessibility_validator(Accessibility::UA1)
@@ -92,79 +185,106 @@ pub fn render(layout: &Layout, document: &Document, fonts: &Fonts) -> Result<Vec
         configuration,
         ..Default::default()
     });
-    let total = layout.pages.len();
-    let theme = &document.theme;
-
-    let header_baseline = theme.page.content_top() - theme.page.header_offset;
-    let footer_baseline = theme.page.content_bottom() + theme.page.footer_offset;
 
     // Marked-content identifiers collected per structure-tree leaf, indexed by
-    // node id. Filled as content is drawn, then woven into the tag tree below.
-    let mut idents: Vec<Vec<Identifier>> = vec![Vec::new(); layout.nodes];
+    // part and then by node id (each part's layout has its own id space).
+    // Filled as content is drawn, then woven into the tag tree below.
+    let mut idents: Vec<Vec<Vec<Identifier>>> = parts
+        .iter()
+        .map(|part| vec![Vec::new(); part.layout.nodes])
+        .collect();
+    // The 0-based index of each part's first page in the combined file, for
+    // the outline destinations.
+    let mut first_pages = Vec::with_capacity(parts.len());
+    let mut pages_so_far = 0;
 
-    for (index, page) in layout.pages.iter().enumerate() {
-        let settings = PageSettings::from_wh(theme.page.width, theme.page.height).ok_or(
-            RenderError::InvalidPageSize {
-                width: theme.page.width,
-                height: theme.page.height,
-            },
-        )?;
-        let mut krilla_page = pdf.start_page_with(settings);
-        let mut surface = krilla_page.surface();
+    for (part, idents) in parts.iter().zip(&mut idents) {
+        let Part { layout, document } = *part;
+        first_pages.push(pages_so_far);
+        pages_so_far += layout.pages.len();
 
-        let page_number = index + 1;
-        draw_chrome(
-            &mut surface,
-            fonts,
-            theme,
-            &document.header,
-            header_baseline,
-            page_number,
-            total,
-            ArtifactType::Header,
-        );
-        for element in &page.elements {
-            draw_element(&mut surface, fonts, element, &mut idents);
+        let total = layout.pages.len();
+        let theme = &document.theme;
+        let header_baseline = theme.page.content_top() - theme.page.header_offset;
+        let footer_baseline = theme.page.content_bottom() + theme.page.footer_offset;
+
+        for (index, page) in layout.pages.iter().enumerate() {
+            let settings = PageSettings::from_wh(theme.page.width, theme.page.height).ok_or(
+                RenderError::InvalidPageSize {
+                    width: theme.page.width,
+                    height: theme.page.height,
+                },
+            )?;
+            let mut krilla_page = pdf.start_page_with(settings);
+            let mut surface = krilla_page.surface();
+
+            let page_number = index + 1;
+            draw_chrome(
+                &mut surface,
+                fonts,
+                theme,
+                &document.header,
+                header_baseline,
+                page_number,
+                total,
+                ArtifactType::Header,
+            );
+            for element in &page.elements {
+                draw_element(&mut surface, fonts, element, idents);
+            }
+            draw_chrome(
+                &mut surface,
+                fonts,
+                theme,
+                &document.footer,
+                footer_baseline,
+                page_number,
+                total,
+                ArtifactType::Footer,
+            );
+
+            surface.finish();
+            krilla_page.finish();
         }
-        draw_chrome(
-            &mut surface,
-            fonts,
-            theme,
-            &document.footer,
-            footer_baseline,
-            page_number,
-            total,
-            ArtifactType::Footer,
-        );
-
-        surface.finish();
-        krilla_page.finish();
     }
 
     // Logical structure tree, in reading order. krilla wraps these top-level
-    // nodes in an implicit Document root.
+    // nodes in an implicit Document root. A single document's nodes sit
+    // directly under it; appended documents each get a Part of their own.
     let mut tree = TagTree::new();
-    for node in &layout.structure {
-        tree.push(build_node(node, &idents));
+    for (part, idents) in parts.iter().zip(&idents) {
+        let nodes = part
+            .layout
+            .structure
+            .iter()
+            .map(|node| build_node(node, idents));
+        if parts.len() == 1 {
+            tree.children.extend(nodes);
+        } else {
+            tree.push(Node::Group(TagGroup::with_children(
+                Tag::Part,
+                nodes.collect(),
+            )));
+        }
     }
     pdf.set_tag_tree(tree);
 
     // Metadata: a title and language are required by PDF/UA, a creation date by
     // PDF/A. Fall back to the first heading for the title and to English for the
-    // language when the document leaves them unset.
-    let title = document
+    // language when left unset.
+    let title = metadata
         .title
         .clone()
         .filter(|s| !s.trim().is_empty())
         .or_else(|| {
-            layout
-                .outline
+            parts
                 .iter()
+                .flat_map(|part| &part.layout.outline)
                 .map(|e| e.title.clone())
                 .find(|s| !s.trim().is_empty())
         })
         .unwrap_or_else(|| "Untitled document".to_string());
-    let language = document
+    let language = metadata
         .language
         .clone()
         .filter(|s| !s.trim().is_empty())
@@ -173,11 +293,17 @@ pub fn render(layout: &Layout, document: &Document, fonts: &Fonts) -> Result<Vec
         Metadata::new()
             .title(title.clone())
             .language(language)
-            .creation_date(creation_date(document.created)),
+            .creation_date(creation_date(metadata.created)),
     );
 
-    // A bookmark outline (required by PDF/UA), nested by heading level.
-    pdf.set_outline(build_outline(&layout.outline, &title));
+    // A bookmark outline (required by PDF/UA), nested by heading level within
+    // each document.
+    let outlines: Vec<(usize, &[OutlineEntry])> = parts
+        .iter()
+        .zip(first_pages)
+        .map(|(part, first_page)| (first_page, part.layout.outline.as_slice()))
+        .collect();
+    pdf.set_outline(build_outline(&outlines, &title));
 
     pdf.finish().map_err(RenderError::Serialize)
 }
@@ -449,15 +575,19 @@ fn to_tag_kind(tag: &StructTag) -> TagKind {
     }
 }
 
-/// Build the bookmark outline from the flat list of headings, nesting each
-/// entry under the most recent shallower one. Levels need not be contiguous.
-/// A destination points at the heading's top on its page.
-fn build_outline(entries: &[OutlineEntry], fallback_title: &str) -> Outline {
+/// Build the bookmark outline from the headings of each document, given as
+/// `(first page, entries)`: the 0-based index of the document's first page in
+/// the combined file, and its headings in document order (page indices
+/// relative to the document). Within a document each entry nests under the
+/// most recent shallower one; levels need not be contiguous. Nesting restarts
+/// at every document, so its headings never file under the previous
+/// document's. A destination points at the heading's top on its page.
+fn build_outline(documents: &[(usize, &[OutlineEntry])], fallback_title: &str) -> Outline {
     let mut outline = Outline::new();
 
-    // PDF/UA requires an outline; if the document has no headings, point a
-    // single entry at the start of the document so one always exists.
-    if entries.is_empty() {
+    // PDF/UA requires an outline; if no document has a heading, point a single
+    // entry at the start of the file so one always exists.
+    if documents.iter().all(|(_, entries)| entries.is_empty()) {
         outline.push_child(OutlineNode::new(
             fallback_title.to_string(),
             XyzDestination::new(0, Point::from_xy(0.0, 0.0)),
@@ -465,23 +595,25 @@ fn build_outline(entries: &[OutlineEntry], fallback_title: &str) -> Outline {
         return outline;
     }
 
-    // A stack of open ancestors (by level). A new entry closes every open node
-    // at its level or deeper, attaching each to its parent, then becomes the
-    // new deepest open node.
-    let mut stack: Vec<(u8, OutlineNode)> = Vec::new();
-    for entry in entries {
-        let node = OutlineNode::new(
-            entry.title.clone(),
-            XyzDestination::new(entry.page_index, Point::from_xy(0.0, entry.y)),
-        );
-        while stack.last().is_some_and(|(level, _)| *level >= entry.level) {
-            let (_, done) = stack.pop().expect("checked non-empty");
+    for &(first_page, entries) in documents {
+        // A stack of open ancestors (by level). A new entry closes every open
+        // node at its level or deeper, attaching each to its parent, then
+        // becomes the new deepest open node.
+        let mut stack: Vec<(u8, OutlineNode)> = Vec::new();
+        for entry in entries {
+            let node = OutlineNode::new(
+                entry.title.clone(),
+                XyzDestination::new(first_page + entry.page_index, Point::from_xy(0.0, entry.y)),
+            );
+            while stack.last().is_some_and(|(level, _)| *level >= entry.level) {
+                let (_, done) = stack.pop().expect("checked non-empty");
+                attach_outline(&mut stack, &mut outline, done);
+            }
+            stack.push((entry.level, node));
+        }
+        while let Some((_, done)) = stack.pop() {
             attach_outline(&mut stack, &mut outline, done);
         }
-        stack.push((entry.level, node));
-    }
-    while let Some((_, done)) = stack.pop() {
-        attach_outline(&mut stack, &mut outline, done);
     }
     outline
 }

@@ -15,6 +15,9 @@
 //! [`theme`] holds the visual design tokens shared across stages, plus the
 //! per-element styles ([`theme::TableStyle`], [`theme::BoxStyle`]).
 //!
+//! Several documents can be appended into one PDF with [`build::Bundle`]; each
+//! keeps its own theme, header and footer, page counter and section numbering.
+//!
 //! ## Example
 //!
 //! ```no_run

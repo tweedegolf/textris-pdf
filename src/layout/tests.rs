@@ -1313,6 +1313,85 @@ fn vertical_header_lines_stack_left_to_right_and_follow_column_alignment() {
     );
 }
 
+/// The column-rule strokes (`(x, top, bottom)`) a laid-out page carries.
+fn column_rules(page: &Page) -> Vec<(f32, f32, f32)> {
+    let theme = Theme::default();
+    page.elements
+        .iter()
+        .filter_map(|e| match e {
+            Element::Stroke {
+                points,
+                width,
+                color,
+                ..
+            } if *color == theme.palette.rule && *width == theme.table.rule_width => {
+                let [(x0, y0), (x1, y1)] = points[..] else {
+                    panic!("a rule is a single segment");
+                };
+                assert!((x0 - x1).abs() < 0.001, "rules are vertical");
+                Some((x0, y0, y1))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_matrix_table_rules_between_its_columns_from_header_to_last_row() {
+    let fonts = test_fonts();
+    let theme = Theme::default();
+    let mut doc = Textris::new();
+    doc.table_styled(
+        &TableStyle::matrix(),
+        ["a", "b", "c"],
+        [["1", "2", "3"], ["4", "5", "6"]],
+    );
+    let pages = layout(&doc.build(), &fonts);
+    let page = &pages[0];
+    let rules = column_rules(page);
+
+    // One segment per row (header plus two body rows) at each of the two
+    // inner column boundaries; none on the outer edges.
+    assert_eq!(rules.len(), 2 * 3, "{rules:?}");
+    let xs: std::collections::BTreeSet<i64> = rules.iter().map(|r| (r.0 * 100.0) as i64).collect();
+    assert_eq!(xs.len(), 2, "two inner boundaries: {xs:?}");
+    let (left, right) = (theme.page.content_left(), theme.page.content_right());
+    assert!(
+        rules.iter().all(|r| r.0 > left + 1.0 && r.0 < right - 1.0),
+        "rules stay inside the table: {rules:?}"
+    );
+
+    // The segments of one rule abut, running from the header's top to the
+    // last row's bottom, below its text.
+    let first_x = *xs.iter().next().unwrap();
+    let mut segments: Vec<_> = rules
+        .iter()
+        .filter(|r| (r.0 * 100.0) as i64 == first_x)
+        .collect();
+    segments.sort_by(|a, b| a.1.total_cmp(&b.1));
+    assert!(
+        (segments[0].1 - theme.page.content_top()).abs() < 0.01,
+        "starts at the header top"
+    );
+    for pair in segments.windows(2) {
+        assert!(
+            (pair[0].2 - pair[1].1).abs() < 0.01,
+            "segments join: {pair:?}"
+        );
+    }
+    let last_baseline = texts(page).iter().map(|t| t.baseline).fold(0.0, f32::max);
+    assert!(
+        segments[2].2 > last_baseline,
+        "ends below the last row's text"
+    );
+
+    // A plain data table draws no rules.
+    let mut plain = Textris::new();
+    plain.table(["a", "b"], [["1", "2"]]);
+    let pages = layout(&plain.build(), &fonts);
+    assert!(column_rules(&pages[0]).is_empty());
+}
+
 #[test]
 fn a_vertical_header_repeats_rotated_on_continuation_pages() {
     let fonts = test_fonts();

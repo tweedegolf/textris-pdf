@@ -100,6 +100,12 @@ pub struct TableStyle {
     /// Hard line breaks (`'\n'`) stack side by side, first line leftmost; the
     /// text is never wrapped. See [`TableStyle::matrix`].
     pub vertical_header: bool,
+    /// Draw a vertical rule between adjacent columns, from the top of the
+    /// header to the bottom of the last row, in the theme's
+    /// [`Palette::rule`](super::Palette::rule) color and
+    /// [`TableMetrics::rule_width`](super::TableMetrics::rule_width). The
+    /// table's outer edges stay open.
+    pub column_rules: bool,
     /// Zebra-stripe alternating body rows with [`Palette::highlight`](super::Palette::highlight).
     pub striped: bool,
     /// Drop the left inset on the first column (a flush key column).
@@ -150,6 +156,7 @@ impl TableStyle {
             header: true,
             header_italic: true,
             vertical_header: false,
+            column_rules: false,
             striped: true,
             flush_first_column: false,
             columns: ColumnWidths::Auto,
@@ -161,8 +168,9 @@ impl TableStyle {
     }
 
     /// A matrix table: a data table whose header labels stand on end (rotated
-    /// 90° counter-clockwise), for many narrow columns of short values under
-    /// long labels, such as a feature or trait matrix.
+    /// 90° counter-clockwise) with a subtle rule between columns, for many
+    /// narrow columns of short values under long labels, such as a feature or
+    /// trait matrix.
     ///
     /// ```
     /// use textris_pdf::theme::{Align, TableStyle};
@@ -176,6 +184,7 @@ impl TableStyle {
     pub fn matrix() -> Self {
         Self {
             vertical_header: true,
+            column_rules: true,
             ..Self::data()
         }
     }
@@ -189,6 +198,7 @@ impl TableStyle {
             header: false,
             header_italic: false,
             vertical_header: false,
+            column_rules: false,
             striped: false,
             flush_first_column: true,
             columns: ColumnWidths::Labels,

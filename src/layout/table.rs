@@ -24,6 +24,8 @@ pub(super) struct RowStyle<'a> {
     /// [`TableStyle::vertical_header`].
     vertical: bool,
     fill: Option<rgb::Color>,
+    /// Rules between adjacent columns; see [`TableStyle::column_rules`].
+    column_rules: bool,
     flush_first_column: bool,
     align: &'a [Align],
     valign: VerticalAlign,
@@ -89,6 +91,7 @@ impl Engine<'_> {
             italic: style.header_italic,
             vertical: style.vertical_header,
             fill: None,
+            column_rules: style.column_rules,
             flush_first_column: style.flush_first_column,
             align: &style.align,
             valign: style.valign,
@@ -731,7 +734,9 @@ impl Engine<'_> {
         }
     }
 
-    /// Push the row's background fill (zebra striping), when it has one.
+    /// Push the row's decorations: its background fill (zebra striping), when
+    /// it has one, and a segment of each column rule. Rows abut, so the
+    /// segments join into continuous rules down the table.
     fn push_row_fill(
         &mut self,
         xs: &[f32],
@@ -751,6 +756,16 @@ impl Engine<'_> {
                 h: height,
                 fill,
             });
+        }
+        if style.column_rules {
+            for &x in &xs[1..columns] {
+                self.push(Element::Stroke {
+                    points: vec![(x, top), (x, top + height)],
+                    width: self.theme.table.rule_width,
+                    color: self.theme.palette.rule,
+                    closed: false,
+                });
+            }
         }
     }
 

@@ -255,6 +255,9 @@ pub struct TableMetrics {
     /// Minimum content height of a row holding a fill-in cell, so there is room
     /// to write above the line.
     pub fill_in_min_height: f32,
+    /// Stroke width of the rules between columns, for tables with
+    /// [`TableStyle::column_rules`].
+    pub rule_width: f32,
 }
 
 impl Default for TableMetrics {
@@ -264,6 +267,7 @@ impl Default for TableMetrics {
             inset_y: em(0.42),
             row_min_height: em(1.0),
             fill_in_min_height: em(3.0),
+            rule_width: 0.5,
         }
     }
 }
@@ -319,6 +323,9 @@ pub struct Palette {
     pub muted: rgb::Color,
     /// Background fill for zebra-striped rows.
     pub highlight: rgb::Color,
+    /// Rules between table columns ([`TableStyle::column_rules`]): subtle,
+    /// a little darker than the stripes.
+    pub rule: rgb::Color,
 }
 
 impl Default for Palette {
@@ -327,6 +334,7 @@ impl Default for Palette {
             text: rgb::Color::new(0, 0, 0),
             muted: rgb::Color::new(0x88, 0x88, 0x88),
             highlight: rgb::Color::new(0xF6, 0xF6, 0xF6),
+            rule: rgb::Color::new(0xD9, 0xD9, 0xD9),
         }
     }
 }

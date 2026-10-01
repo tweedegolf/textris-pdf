@@ -96,14 +96,15 @@
 //! - `style = "data"`, `"label"` or `"matrix"` selects [`TableStyle::data`] /
 //!   [`TableStyle::label`] / [`TableStyle::matrix`] explicitly.
 //! - `vertical-header` stands the header labels on end (rotated 90°
-//!   counter-clockwise), as [`TableStyle::matrix`] does.
+//!   counter-clockwise) and `column-rules` draws a rule between columns, as
+//!   [`TableStyle::matrix`] does.
 //! - `widths` is a space-separated list per column: `auto`, a bare integer
 //!   ([`ColumnWidth::Fraction`]), or a point value like `120pt`
 //!   ([`ColumnWidth::Absolute`]; `em` also accepted).
 //! - `valign = "top"`, `"middle"` or `"bottom"` sets how cell content sits in a
 //!   row taller than its own content ([`VerticalAlign`]; `top` by default).
-//! - `striped`, `vertical-header`, `row-height`, `font-size` and
-//!   `flush-first` override the corresponding [`TableStyle`] fields.
+//! - `striped`, `vertical-header`, `column-rules`, `row-height`, `font-size`
+//!   and `flush-first` override the corresponding [`TableStyle`] fields.
 //!
 //! Heading attributes: `{ numbered = false }` (or `true`) overrides
 //! [`ParseOptions::numbered_heading_levels`]; `{ label = "vision" }` sets the
@@ -1046,6 +1047,9 @@ impl Parser<'_> {
         if let Some(vertical) = attrs.bool("vertical-header")? {
             style.vertical_header = vertical;
         }
+        if let Some(rules) = attrs.bool("column-rules")? {
+            style.column_rules = rules;
+        }
         if let Some(flush) = attrs.bool("flush-first")? {
             style.flush_first_column = flush;
         }
@@ -1968,17 +1972,24 @@ mod tests {
     }
 
     #[test]
-    fn a_matrix_style_or_vertical_header_flag_stands_the_header_on_end() {
+    fn matrix_style_and_its_flags_stand_the_header_on_end_and_rule_columns() {
         let blocks = parse("{ style = \"matrix\" }\n| a | b |\n| - | - |\n| 1 | 2 |\n");
         assert_eq!(table(&blocks[0]).style, TableStyle::matrix());
         assert!(table(&blocks[0]).style.vertical_header);
+        assert!(table(&blocks[0]).style.column_rules);
 
-        let blocks = parse("{ vertical-header }\n| a | b |\n| - | - |\n| 1 | 2 |\n");
+        let blocks = parse("{ vertical-header, column-rules }\n| a | b |\n| - | - |\n| 1 | 2 |\n");
         assert_eq!(table(&blocks[0]).style, TableStyle::matrix());
 
-        let blocks =
-            parse("{ style = \"matrix\", vertical-header = false }\n| a |\n| - |\n| 1 |\n");
+        let blocks = parse(
+            "{ style = \"matrix\", vertical-header = false, column-rules = false }\n| a |\n| - |\n| 1 |\n",
+        );
         assert_eq!(table(&blocks[0]).style, TableStyle::data());
+
+        // The flags are independent: rules alone on an upright data table.
+        let blocks = parse("{ column-rules }\n| a |\n| - |\n| 1 |\n");
+        let style = &table(&blocks[0]).style;
+        assert!(style.column_rules && !style.vertical_header);
 
         // The error for an unknown style names the new preset too.
         let error = parse_err("{ style = \"grid\" }\n| a |\n| - |\n| 1 |\n");

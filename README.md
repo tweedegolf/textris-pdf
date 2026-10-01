@@ -361,7 +361,7 @@ let mut doc = Textris::with_theme(theme);
 ```
 
 Tables are styled per-table. A [`TableStyle`](src/theme/style.rs) bundles the choices
-for one table (header row, italics, vertical headers, striping, column sizing,
+for one table (header row, italics, vertical headers, column rules, striping, column sizing,
 horizontal and vertical alignment, flush label column, fill-in blanks). Define
 your styles up front and reference one when adding a table;
 `TableStyle::data()`, `TableStyle::label()` and `TableStyle::matrix()` are the
@@ -386,7 +386,8 @@ let amounts = TableStyle {
 let centered = TableStyle { valign: VerticalAlign::Middle, ..TableStyle::data() };
 
 // A matrix stands its header labels on end (rotated 90° counter-clockwise),
-// so long labels no longer widen narrow columns of short values.
+// so long labels no longer widen narrow columns of short values, and draws a
+// subtle rule between columns (`theme.palette.rule`, `theme.table.rule_width`).
 let matrix = TableStyle { align: vec![Align::Left, Align::Center], ..TableStyle::matrix() };
 
 let mut doc = Textris::new();

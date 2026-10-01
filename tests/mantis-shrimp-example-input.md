@@ -123,7 +123,7 @@ lifetime.
 
 ### Notable species
 
-|  |  | species | strike | max. length |
+|  | common name | species | strike | max. length |
 | --- | --- | --- | --- | --- |
 | 1 | Peacock mantis shrimp | *Odontodactylus scyllarus* | smasher | `18 cm` |
 | 2 | Zebra mantis shrimp | *Lysiosquillina maculata* | spearer | `40 cm` |

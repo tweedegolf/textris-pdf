@@ -29,10 +29,10 @@
 use std::io::{self, Cursor};
 
 use docx_rs::{
-    AlignmentType, BreakType, Docx, FieldCharType, Footer, Header, InstrNUMPAGES, InstrPAGE,
-    InstrText, LineSpacing, LineSpacingType, PageMargin, Paragraph, Run, RunFonts, Shading,
-    ShdType, SpecialIndentType, Table as DocxTable, TableCell, TableRow, TextDirectionType,
-    VAlignType, WidthType,
+    AlignmentType, BorderType, BreakType, Docx, FieldCharType, Footer, Header, InstrNUMPAGES,
+    InstrPAGE, InstrText, LineSpacing, LineSpacingType, PageMargin, Paragraph, Run, RunFonts,
+    Shading, ShdType, SpecialIndentType, Table as DocxTable, TableBorder, TableBorderPosition,
+    TableBorders, TableCell, TableRow, TextDirectionType, VAlignType, WidthType,
 };
 use krilla::color::rgb;
 
@@ -301,8 +301,30 @@ fn build_table(table: &crate::model::Table, theme: &Theme) -> DocxTable {
     }
 
     // No borders: the zebra striping already delineates the rows, matching the
-    // PDF renderer's borderless look.
-    DocxTable::without_borders(rows).width(content_twips(theme), WidthType::Dxa)
+    // PDF renderer's borderless look. Column rules become the inside vertical
+    // border alone (the outer edges stay open, as in the PDF).
+    let mut docx_table =
+        DocxTable::without_borders(rows).width(content_twips(theme), WidthType::Dxa);
+    if style.column_rules {
+        // Border sizes are in eighths of a point.
+        let size = (theme.table.rule_width * 8.0).round().max(1.0) as usize;
+        let rule = TableBorder::new(TableBorderPosition::InsideV)
+            .border_type(BorderType::Single)
+            .size(size)
+            .color(hex(palette.rule));
+        let borders = [
+            TableBorderPosition::Top,
+            TableBorderPosition::Left,
+            TableBorderPosition::Bottom,
+            TableBorderPosition::Right,
+            TableBorderPosition::InsideH,
+        ]
+        .into_iter()
+        .fold(TableBorders::with_empty(), TableBorders::clear)
+        .set(rule);
+        docx_table = docx_table.set_borders(borders);
+    }
+    docx_table
 }
 
 /// Build one table row, padding to `columns` cells.
@@ -550,6 +572,39 @@ mod tests {
             "header cells turn bottom-to-top"
         );
         assert!(!xml(&body).contains("btLr"), "body cells stay upright");
+    }
+
+    #[test]
+    fn column_rules_become_the_inside_vertical_border() {
+        use docx_rs::BuildXML;
+        let theme = Theme::default();
+        let docx_xml = |doc: Textris| match &doc.build().blocks[0] {
+            Block::Table(table) => {
+                String::from_utf8(build_table(table, &theme).build()).expect("utf-8 xml")
+            }
+            other => panic!("expected a table, got {other:?}"),
+        };
+
+        let mut doc = Textris::new();
+        doc.table_styled(
+            &crate::theme::TableStyle::matrix(),
+            ["a", "b"],
+            [["1", "2"]],
+        );
+        let xml = docx_xml(doc);
+        assert!(
+            xml.contains(&format!(
+                "<w:insideV w:val=\"single\" w:sz=\"4\" w:space=\"0\" w:color=\"{}\" />",
+                hex(theme.palette.rule)
+            )),
+            "{xml}"
+        );
+        assert!(xml.contains("<w:insideH w:val=\"nil\""), "{xml}");
+
+        let mut plain = Textris::new();
+        plain.table(["a", "b"], [["1", "2"]]);
+        let xml = docx_xml(plain);
+        assert!(!xml.contains("w:insideV w:val=\"single\""), "{xml}");
     }
 
     #[test]

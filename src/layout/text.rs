@@ -122,25 +122,61 @@ impl Engine<'_> {
         color: rgb::Color,
     ) {
         let baseline = top + self.fonts.ascent(Style::Regular, size);
-        let mut x = x_left;
+        self.emit_line(line, (x_left, baseline), size, color, false);
+    }
+
+    /// Emit one line of words rotated 90° counter-clockwise, reading upward
+    /// from `bottom`. `x_left` is the left edge of the line box, which then
+    /// stands one line height wide: the text's ascent side faces left.
+    pub(super) fn draw_line_vertical(
+        &mut self,
+        line: &[Word],
+        x_left: f32,
+        bottom: f32,
+        size: f32,
+        color: rgb::Color,
+    ) {
+        let baseline_x = x_left + self.fonts.ascent(Style::Regular, size);
+        self.emit_line(line, (baseline_x, bottom), size, color, true);
+    }
+
+    /// Emit a line's merged runs from `origin` (the first glyph's baseline
+    /// origin), advancing rightward, or upward when `rotated`.
+    fn emit_line(
+        &mut self,
+        line: &[Word],
+        origin: (f32, f32),
+        size: f32,
+        color: rgb::Color,
+        rotated: bool,
+    ) {
+        // The baseline origin of a run `advance` points into the line.
+        let at = |advance: f32| {
+            if rotated {
+                (origin.0, origin.1 - advance)
+            } else {
+                (origin.0 + advance, origin.1)
+            }
+        };
+        let mut advance = 0.0;
         let mut index = 0;
         while index < line.len() {
             let style = line[index].style;
             let run_color = line[index].color.unwrap_or(color);
             if index > 0 {
-                x += self.fonts.space_width(style, size);
+                advance += self.fonts.space_width(style, size);
             }
             // A fill-in line draws a baseline stroke rather than glyphs, and is
             // never merged into a neighbouring text run.
             if line[index].kind == WordKind::FillIn {
                 let width = line[index].width;
                 self.push(Element::Stroke {
-                    points: vec![(x, baseline), (x + width, baseline)],
+                    points: vec![at(advance), at(advance + width)],
                     width: 0.7,
                     color: run_color,
                     closed: false,
                 });
-                x += width;
+                advance += width;
                 index += 1;
                 continue;
             }
@@ -153,6 +189,7 @@ impl Engine<'_> {
                 run_end += 1;
             }
             let (text, glyphs, width) = self.merge_run(&line[index..run_end], style, size);
+            let (x, baseline) = at(advance);
             self.push(Element::Text(TextElement {
                 x,
                 baseline,
@@ -162,8 +199,9 @@ impl Engine<'_> {
                 glyphs,
                 text,
                 tag: self.current_tag,
+                rotated,
             }));
-            x += width;
+            advance += width;
             index = run_end;
         }
     }

@@ -31,7 +31,8 @@ use std::io::{self, Cursor};
 use docx_rs::{
     AlignmentType, BreakType, Docx, FieldCharType, Footer, Header, InstrNUMPAGES, InstrPAGE,
     InstrText, LineSpacing, LineSpacingType, PageMargin, Paragraph, Run, RunFonts, Shading,
-    ShdType, SpecialIndentType, Table as DocxTable, TableCell, TableRow, VAlignType, WidthType,
+    ShdType, SpecialIndentType, Table as DocxTable, TableCell, TableRow, TextDirectionType,
+    VAlignType, WidthType,
 };
 use krilla::color::rgb;
 
@@ -323,6 +324,11 @@ fn build_row(
             let mut cell = TableCell::new()
                 .add_paragraph(paragraph)
                 .vertical_align(vertical_alignment(style.valign));
+            if header && style.vertical_header {
+                // Word's bottom-to-top text direction: the same 90°
+                // counter-clockwise rotation as the PDF's vertical header.
+                cell = cell.text_direction(TextDirectionType::BtLr);
+            }
             if striped {
                 cell = cell.shading(fill(palette.highlight));
             }
@@ -514,6 +520,36 @@ mod tests {
         doc.ordered_list_with(ListMarker::LowerAlpha, ["alpha", "beta"]);
         // Just exercises the LowerAlpha branch end-to-end.
         assert_is_docx(&doc.to_docx().unwrap());
+    }
+
+    #[test]
+    fn a_vertical_header_cell_reads_bottom_to_top() {
+        let style = crate::theme::TableStyle::matrix();
+        let header = build_row(
+            &[Cell::Text(vec![Inline::new("label")])],
+            1,
+            &style,
+            9.0,
+            &Palette::default(),
+            true,
+            false,
+        );
+        let body = build_row(
+            &[Cell::Text(vec![Inline::new("x")])],
+            1,
+            &style,
+            9.0,
+            &Palette::default(),
+            false,
+            false,
+        );
+        use docx_rs::BuildXML;
+        let xml = |row: &TableRow| String::from_utf8(row.build()).expect("utf-8 xml");
+        assert!(
+            xml(&header).contains("btLr"),
+            "header cells turn bottom-to-top"
+        );
+        assert!(!xml(&body).contains("btLr"), "body cells stay upright");
     }
 
     #[test]

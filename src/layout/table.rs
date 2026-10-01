@@ -20,6 +20,9 @@ use crate::{
 /// theme.
 pub(super) struct RowStyle<'a> {
     italic: bool,
+    /// Text stands on end (rotated 90° counter-clockwise), unwrapped; see
+    /// [`TableStyle::vertical_header`].
+    vertical: bool,
     fill: Option<rgb::Color>,
     flush_first_column: bool,
     align: &'a [Align],
@@ -84,6 +87,7 @@ impl Engine<'_> {
     fn header_row_style<'a>(&self, style: &'a TableStyle) -> RowStyle<'a> {
         RowStyle {
             italic: style.header_italic,
+            vertical: style.vertical_header,
             fill: None,
             flush_first_column: style.flush_first_column,
             align: &style.align,
@@ -99,6 +103,7 @@ impl Engine<'_> {
     fn body_row_style<'a>(&self, style: &'a TableStyle, fill: Option<rgb::Color>) -> RowStyle<'a> {
         RowStyle {
             italic: false,
+            vertical: false,
             fill,
             ..self.header_row_style(style)
         }
@@ -173,12 +178,14 @@ impl Engine<'_> {
 
         // Reused every time the header row repeats after a page break. A
         // header taller than the page can neither fit anywhere nor repeat:
-        // it splits across pages like an over-tall body row.
+        // it splits across pages like an over-tall body row. A vertical
+        // header has no lines to split at and is drawn whole regardless.
         let page_height = self.theme.page.content_bottom() - self.theme.page.content_top();
         let header_height = table
             .has_header()
             .then(|| self.row_height(&table.headers, &widths, columns, &header_style));
-        let header_splits = header_height.is_some_and(|height| height > page_height + FIT_EPSILON);
+        let header_splits = !style.vertical_header
+            && header_height.is_some_and(|height| height > page_height + FIT_EPSILON);
         let repeat_header_tags = vec![Tagging::Artifact; columns];
         let repeat_header = header_height
             .filter(|_| !header_splits)
@@ -476,18 +483,26 @@ impl Engine<'_> {
             }
             natural = natural.max(line_width);
         };
-        // Only a rendered header row participates in column sizing.
+        // Only a rendered header row participates in column sizing. A vertical
+        // header label is as wide as its stack of (hard-break) lines, however
+        // long the label.
+        let mut header_stack = 0.0_f32;
         if table.has_header()
             && let Some(cell) = table.headers.get(column)
         {
-            consider(cell, table.style.header_italic);
+            if table.style.vertical_header {
+                let lines = self.unwrapped_lines(cell, table.style.header_italic, size);
+                header_stack = lines.len() as f32 * size * self.theme.spacing.line_height;
+            } else {
+                consider(cell, table.style.header_italic);
+            }
         }
         for row in &table.rows {
             if let Some(cell) = row.get(column) {
                 consider(cell, false);
             }
         }
-        (min, natural)
+        (min.max(header_stack), natural.max(header_stack))
     }
 
     /// The minimum content height a row's *non-text* cells ask for: the style's
@@ -519,6 +534,13 @@ impl Engine<'_> {
             if matches!(cell, Some(Cell::Spacer(_) | Cell::FillIn)) {
                 continue;
             }
+            if style.vertical {
+                // Standing text is as tall as its longest line is wide.
+                for line in self.vertical_lines(cell, style) {
+                    content = content.max(self.line_width(&line, body));
+                }
+                continue;
+            }
             let avail = self.cell_available_width(widths[c], c, style);
             let words = self.tokenize(
                 cell.map(Cell::inlines).unwrap_or(&[]),
@@ -530,6 +552,25 @@ impl Engine<'_> {
             content = content.max(lines.len() as f32 * line_h);
         }
         content + 2.0 * self.theme.table.inset_y
+    }
+
+    /// A cell's text split at hard breaks only, never wrapped: the lines of a
+    /// vertical (rotated) cell, which stand side by side instead of stacking.
+    fn vertical_lines(&self, cell: Option<&Cell>, style: &RowStyle) -> Vec<Vec<Word>> {
+        match cell {
+            Some(cell) => self.unwrapped_lines(cell, style.italic, style.size),
+            None => Vec::new(),
+        }
+    }
+
+    /// Tokenize a cell and split it at hard breaks only.
+    fn unwrapped_lines(&self, cell: &Cell, italic: bool, size: f32) -> Vec<Vec<Word>> {
+        let words = self.tokenize(cell.inlines(), false, italic, size);
+        if words.is_empty() {
+            return Vec::new();
+        }
+        // No width fits nothing, so wrapping only honors the hard breaks.
+        self.wrap(words, f32::INFINITY, size)
     }
 
     /// Draw one table row at the current pen position and advance past it.
@@ -567,6 +608,20 @@ impl Engine<'_> {
                 Some(Cell::Blank | Cell::Spacer(_)) | None => continue,
             };
             if cell.is_empty() {
+                continue;
+            }
+            if style.vertical {
+                // Lines stand side by side, each one line box wide, the first
+                // leftmost; every label starts at the bottom inset and reads
+                // upward, so all labels meet the body row whatever their length.
+                let lines = self.vertical_lines(cells.get(c), style);
+                let stack = lines.len() as f32 * line_h;
+                let mut x = self.stack_x(stack, c, xs, widths, style);
+                let bottom = top + height - self.theme.table.inset_y;
+                for line in &lines {
+                    self.draw_line_vertical(line, x, bottom, body, text_color);
+                    x += line_h;
+                }
                 continue;
             }
             let avail = self.cell_available_width(widths[c], c, style);
@@ -760,6 +815,20 @@ impl Engine<'_> {
             Align::Right => {
                 xs[c] + widths[c] - self.theme.table.inset_x - self.line_width(line, style.size)
             }
+        }
+    }
+
+    /// The x where a vertical cell's stack of standing lines (`stack` wide)
+    /// starts in column `c`, honoring the column's alignment.
+    fn stack_x(&self, stack: f32, c: usize, xs: &[f32], widths: &[f32], style: &RowStyle) -> f32 {
+        let inset_left = self.cell_inset_left(c, style);
+        match style.align(c) {
+            Align::Left => xs[c] + inset_left,
+            Align::Center => {
+                let avail = self.cell_available_width(widths[c], c, style);
+                xs[c] + inset_left + (avail - stack) / 2.0
+            }
+            Align::Right => xs[c] + widths[c] - self.theme.table.inset_x - stack,
         }
     }
 

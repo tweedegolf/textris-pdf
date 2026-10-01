@@ -1153,6 +1153,195 @@ fn an_unstriped_table_style_draws_no_row_fills() {
     assert_eq!(rects, 0, "an unstriped style should draw no row fills");
 }
 
+/// Lay out a one-column matrix table whose header label is far wider than
+/// its body cell, returning the header's text elements, the header row's
+/// height (the first stripe's top is the header's bottom) and the column width.
+fn vertical_header_layout(style: &TableStyle) -> (Vec<TextElement>, f32, f32) {
+    let fonts = test_fonts();
+    let mut doc = Textris::new();
+    doc.table_styled(style, ["a rather long header label"], [["x"], ["y"]]);
+    let pages = layout(&doc.build(), &fonts);
+    let page = &pages[0];
+    let header: Vec<TextElement> = texts(page)
+        .into_iter()
+        .filter(|t| t.rotated)
+        .cloned()
+        .collect();
+    let (stripe_top, stripe_width) = page
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            Element::Rect { y, w, .. } => Some((*y, *w)),
+            _ => None,
+        })
+        .expect("striped body row");
+    let theme = Theme::default();
+    let header_height = stripe_top - theme.page.content_top();
+    (header, header_height, stripe_width)
+}
+
+#[test]
+fn a_vertical_header_stands_its_labels_on_end() {
+    use crate::fonts::Style;
+    let fonts = test_fonts();
+    let theme = Theme::default();
+    let style = TableStyle::matrix();
+    assert!(style.vertical_header);
+
+    let (header, header_height, width) = vertical_header_layout(&style);
+    let body = theme.font_size.body;
+
+    // The label is one rotated run; the body text is drawn upright.
+    assert_eq!(header.len(), 1, "one rotated header run");
+    let label = &header[0];
+    assert_eq!(label.text, "a rather long header label");
+    assert_eq!(label.style, Style::Italic, "matrix headers are italic");
+
+    // The header row is as tall as the label is wide (plus insets), and the
+    // label's origin sits on the bottom inset, reading upward from there. The
+    // width is measured as the line is drawn: word by word, a space between.
+    let words: Vec<&str> = label.text.split(' ').collect();
+    let label_width = words
+        .iter()
+        .map(|word| fonts.shape(Style::Italic, word).width(body))
+        .sum::<f32>()
+        + (words.len() - 1) as f32 * fonts.space_width(Style::Italic, body);
+    let expected_height = label_width + 2.0 * theme.table.inset_y;
+    assert!(
+        (header_height - expected_height).abs() < 0.05,
+        "header height {header_height} vs {expected_height}"
+    );
+    let expected_baseline = theme.page.content_top() + header_height - theme.table.inset_y;
+    assert!(
+        (label.baseline - expected_baseline).abs() < 0.01,
+        "baseline {} vs {expected_baseline}",
+        label.baseline
+    );
+
+    // The label's ascent side faces left, so the standing line box starts at
+    // the cell's left inset.
+    let expected_x =
+        theme.page.content_left() + theme.table.inset_x + fonts.ascent(Style::Regular, body);
+    assert!(
+        (label.x - expected_x).abs() < 0.01,
+        "x {} vs {expected_x}",
+        label.x
+    );
+
+    // The lone column still spans the content width; that the label does not
+    // widen a column is covered by `a_vertical_header_does_not_widen_its_column`.
+    assert!((width - theme.page.content_width()).abs() < 0.01);
+}
+
+#[test]
+fn a_vertical_header_does_not_widen_its_column() {
+    let fonts = test_fonts();
+    let theme = Theme::default();
+    let label = "a rather long header label that would dominate";
+    let long_body = "body text wide enough to claim most of the width ".repeat(2);
+
+    let widths_for = |style: &TableStyle| {
+        let mut doc = Textris::new();
+        doc.table_styled(style, [label, "b"], [[cell("x"), cell(long_body.clone())]]);
+        let pages = layout(&doc.build(), &fonts);
+        let x_of = |needle: &str| {
+            texts(&pages[0])
+                .into_iter()
+                .find(|t| t.text.starts_with(needle))
+                .map(|t| t.x)
+                .expect("cell text")
+        };
+        x_of("body") - theme.page.content_left()
+    };
+
+    // Upright, the long label forces a wide first column; standing, the first
+    // column is only as wide as its one-letter body (plus insets and one line
+    // box for the label), so the second column starts much further left.
+    let upright = widths_for(&TableStyle::data());
+    let standing = widths_for(&TableStyle::matrix());
+    let line_h = theme.font_size.body * theme.spacing.line_height;
+    assert!(
+        standing < upright / 2.0,
+        "standing header column {standing} should be far narrower than upright {upright}"
+    );
+    assert!(
+        standing >= line_h + 2.0 * theme.table.inset_x - 0.01,
+        "the column still fits one standing line box: {standing}"
+    );
+}
+
+#[test]
+fn vertical_header_lines_stack_left_to_right_and_follow_column_alignment() {
+    use crate::theme::Align;
+    let fonts = test_fonts();
+    let theme = Theme::default();
+    let line_h = theme.font_size.body * theme.spacing.line_height;
+
+    let mut doc = Textris::new();
+    let centered = TableStyle {
+        align: vec![Align::Center],
+        ..TableStyle::matrix()
+    };
+    doc.table_styled(&centered, ["first\nsecond"], [["a wide body cell"]]);
+    let pages = layout(&doc.build(), &fonts);
+    let header: Vec<&TextElement> = texts(&pages[0]).into_iter().filter(|t| t.rotated).collect();
+    assert_eq!(header.len(), 2, "one run per hard-break line");
+    let (first, second) = (header[0], header[1]);
+    assert_eq!(
+        (first.text.as_str(), second.text.as_str()),
+        ("first", "second")
+    );
+
+    // The first line stands leftmost; the second exactly one line box right.
+    assert!(
+        (second.x - first.x - line_h).abs() < 0.01,
+        "lines {} and {} should be one line box apart",
+        first.x,
+        second.x
+    );
+    // Both start from the same bottom inset.
+    assert!((first.baseline - second.baseline).abs() < 0.01);
+
+    // Centered: the two-line stack is centered in the cell's available width.
+    let avail = theme.page.content_width() - 2.0 * theme.table.inset_x;
+    let stack_left = theme.page.content_left() + theme.table.inset_x + (avail - 2.0 * line_h) / 2.0;
+    let expected_x = stack_left + fonts.ascent(crate::fonts::Style::Regular, theme.font_size.body);
+    assert!(
+        (first.x - expected_x).abs() < 0.01,
+        "x {} vs {expected_x}",
+        first.x
+    );
+}
+
+#[test]
+fn a_vertical_header_repeats_rotated_on_continuation_pages() {
+    let fonts = test_fonts();
+    let mut doc = Textris::new();
+    doc.table_styled(
+        &TableStyle::matrix(),
+        ["label"],
+        (0..80).map(|i| [format!("row {i}")]),
+    );
+    let pages = layout(&doc.build(), &fonts);
+    assert!(pages.len() >= 2, "expected pagination");
+    for (number, page) in pages.iter().enumerate() {
+        let rotated: Vec<_> = texts(page).into_iter().filter(|t| t.rotated).collect();
+        assert_eq!(
+            rotated.len(),
+            1,
+            "page {number} should carry the header once"
+        );
+        let expected = if number == 0 {
+            // Tagged as content on its first appearance ...
+            matches!(rotated[0].tag, Tagging::Content(_))
+        } else {
+            // ... and redrawn as an artifact when repeated.
+            rotated[0].tag == Tagging::Artifact
+        };
+        assert!(expected, "page {number} header tagging");
+    }
+}
+
 #[test]
 fn a_box_draws_a_background_and_insets_its_content() {
     use crate::theme::BoxStyle;

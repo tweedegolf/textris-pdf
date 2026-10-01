@@ -78,8 +78,8 @@ impl ColumnWidths {
 
 /// The presentation of a single table.
 ///
-/// Build the common cases with [`TableStyle::data`] / [`TableStyle::label`],
-/// then tweak individual fields:
+/// Build the common cases with [`TableStyle::data`], [`TableStyle::label`] or
+/// [`TableStyle::matrix`], then tweak individual fields:
 ///
 /// ```
 /// use textris_pdf::theme::TableStyle;
@@ -94,6 +94,12 @@ pub struct TableStyle {
     pub header: bool,
     /// Render the header row in italics.
     pub header_italic: bool,
+    /// Rotate the header row's text 90° counter-clockwise, so each label reads
+    /// bottom-to-top. Header labels then no longer widen their columns (only
+    /// the body does), and the header row grows to the longest label instead.
+    /// Hard line breaks (`'\n'`) stack side by side, first line leftmost; the
+    /// text is never wrapped. See [`TableStyle::matrix`].
+    pub vertical_header: bool,
     /// Zebra-stripe alternating body rows with [`Palette::highlight`](super::Palette::highlight).
     pub striped: bool,
     /// Drop the left inset on the first column (a flush key column).
@@ -143,6 +149,7 @@ impl TableStyle {
         Self {
             header: true,
             header_italic: true,
+            vertical_header: false,
             striped: true,
             flush_first_column: false,
             columns: ColumnWidths::Auto,
@@ -150,6 +157,26 @@ impl TableStyle {
             valign: VerticalAlign::Top,
             font_size: None,
             row_min_height: None,
+        }
+    }
+
+    /// A matrix table: a data table whose header labels stand on end (rotated
+    /// 90° counter-clockwise), for many narrow columns of short values under
+    /// long labels, such as a feature or trait matrix.
+    ///
+    /// ```
+    /// use textris_pdf::theme::{Align, TableStyle};
+    ///
+    /// // A matrix whose mark columns are centered under their labels.
+    /// let traits = TableStyle {
+    ///     align: vec![Align::Left, Align::Center, Align::Center],
+    ///     ..TableStyle::matrix()
+    /// };
+    /// ```
+    pub fn matrix() -> Self {
+        Self {
+            vertical_header: true,
+            ..Self::data()
         }
     }
 
@@ -161,6 +188,7 @@ impl TableStyle {
         Self {
             header: false,
             header_italic: false,
+            vertical_header: false,
             striped: false,
             flush_first_column: true,
             columns: ColumnWidths::Labels,

@@ -93,15 +93,17 @@
 //! | 1 | Jansen | A.B. | 1234 AB | Leiden |
 //! ```
 //!
-//! - `style = "data"` or `"label"` selects [`TableStyle::data`] /
-//!   [`TableStyle::label`] explicitly.
+//! - `style = "data"`, `"label"` or `"matrix"` selects [`TableStyle::data`] /
+//!   [`TableStyle::label`] / [`TableStyle::matrix`] explicitly.
+//! - `vertical-header` stands the header labels on end (rotated 90°
+//!   counter-clockwise), as [`TableStyle::matrix`] does.
 //! - `widths` is a space-separated list per column: `auto`, a bare integer
 //!   ([`ColumnWidth::Fraction`]), or a point value like `120pt`
 //!   ([`ColumnWidth::Absolute`]; `em` also accepted).
 //! - `valign = "top"`, `"middle"` or `"bottom"` sets how cell content sits in a
 //!   row taller than its own content ([`VerticalAlign`]; `top` by default).
-//! - `striped`, `row-height`, `font-size` and `flush-first` override the
-//!   corresponding [`TableStyle`] fields.
+//! - `striped`, `vertical-header`, `row-height`, `font-size` and
+//!   `flush-first` override the corresponding [`TableStyle`] fields.
 //!
 //! Heading attributes: `{ numbered = false }` (or `true`) overrides
 //! [`ParseOptions::numbered_heading_levels`]; `{ label = "vision" }` sets the
@@ -998,6 +1000,7 @@ impl Parser<'_> {
         let mut style = match attrs.string("style")? {
             Some(choice) => match choice.as_str() {
                 "data" => TableStyle::data(),
+                "matrix" => TableStyle::matrix(),
                 "label" => {
                     if has_header && !headers.iter().all(Cell::is_blank) {
                         return err(raw_rows[0].0, "a label table cannot have a header row");
@@ -1007,7 +1010,7 @@ impl Parser<'_> {
                 other => {
                     return err(
                         attrs.line,
-                        format!("unknown table style `{other}` (use `data` or `label`)"),
+                        format!("unknown table style `{other}` (use `data`, `label` or `matrix`)"),
                     );
                 }
             },
@@ -1039,6 +1042,9 @@ impl Parser<'_> {
         }
         if let Some(striped) = attrs.bool("striped")? {
             style.striped = striped;
+        }
+        if let Some(vertical) = attrs.bool("vertical-header")? {
+            style.vertical_header = vertical;
         }
         if let Some(flush) = attrs.bool("flush-first")? {
             style.flush_first_column = flush;
@@ -1959,6 +1965,24 @@ mod tests {
         let error = parse_err(&source("centre"));
         assert_eq!(error.line, 1);
         assert!(error.message.contains("vertical alignment"), "{error}");
+    }
+
+    #[test]
+    fn a_matrix_style_or_vertical_header_flag_stands_the_header_on_end() {
+        let blocks = parse("{ style = \"matrix\" }\n| a | b |\n| - | - |\n| 1 | 2 |\n");
+        assert_eq!(table(&blocks[0]).style, TableStyle::matrix());
+        assert!(table(&blocks[0]).style.vertical_header);
+
+        let blocks = parse("{ vertical-header }\n| a | b |\n| - | - |\n| 1 | 2 |\n");
+        assert_eq!(table(&blocks[0]).style, TableStyle::matrix());
+
+        let blocks =
+            parse("{ style = \"matrix\", vertical-header = false }\n| a |\n| - |\n| 1 |\n");
+        assert_eq!(table(&blocks[0]).style, TableStyle::data());
+
+        // The error for an unknown style names the new preset too.
+        let error = parse_err("{ style = \"grid\" }\n| a |\n| - |\n| 1 |\n");
+        assert!(error.message.contains("`matrix`"), "{error}");
     }
 
     #[test]

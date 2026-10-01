@@ -37,7 +37,7 @@ use krilla::{
     configure::{Accessibility, Archival, ConfigurationBuilder},
     destination::XyzDestination,
     error::KrillaError,
-    geom::{PathBuilder, Point, Rect},
+    geom::{PathBuilder, Point, Rect, Transform},
     metadata::{DateTime, Metadata},
     num::NormalizedF32,
     outline::{Outline, OutlineNode},
@@ -360,6 +360,11 @@ fn draw_element(
 fn draw_text(surface: &mut Surface, fonts: &Fonts, text: &TextElement) {
     surface.set_stroke(None);
     surface.set_fill(Some(solid_fill(text.color)));
+    // A rotated run turns 90° counter-clockwise about its own origin. The
+    // page surface is y-down, where a positive angle turns clockwise.
+    if text.rotated {
+        surface.push_transform(&Transform::from_rotate_at(-90.0, text.x, text.baseline));
+    }
     surface.draw_glyphs(
         Point::from_xy(text.x, text.baseline),
         &text.glyphs,
@@ -368,6 +373,9 @@ fn draw_text(surface: &mut Surface, fonts: &Fonts, text: &TextElement) {
         text.size,
         false,
     );
+    if text.rotated {
+        surface.pop();
+    }
 }
 
 fn draw_rect(surface: &mut Surface, x: f32, y: f32, w: f32, h: f32, fill: rgb::Color) {

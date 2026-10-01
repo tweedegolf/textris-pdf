@@ -123,7 +123,7 @@ lifetime.
 
 ### Notable species
 
-|  | common name | species | strike | max. length |
+|  |  | species | strike | max. length |
 | --- | --- | --- | --- | --- |
 | 1 | Peacock mantis shrimp | *Odontodactylus scyllarus* | smasher | `18 cm` |
 | 2 | Zebra mantis shrimp | *Lysiosquillina maculata* | spearer | `40 cm` |
@@ -132,6 +132,21 @@ lifetime.
 | 5 | Spottail mantis shrimp | *Squilla mantis* | spearer | `20 cm` |
 | 6 | Giant mantis shrimp | *Hemisquilla californiensis* | smasher | `30 cm` |
 | 7 | Ciliated false squilla | *Pseudosquilla ciliata* | spearer | `10 cm` |
+
+### Species at a glance
+
+Strike type, shelter and range of the species above, side by side:
+
+{ style = "matrix" }
+|  | common name | smasher | spearer | digs a burrow | Indo-Pacific | Atlantic | eastern Pacific |
+| --- | --- | :---: | :---: | :---: | :---: | :---: | :---: |
+| 1 | Peacock mantis shrimp | x |  |  | x |  |  |
+| 2 | Zebra mantis shrimp |  | x | x | x |  |  |
+| 3 | Purple-spot mantis shrimp | x |  |  | x |  |  |
+| 4 | Caribbean rock mantis shrimp | x |  |  |  | x |  |
+| 5 | Spottail mantis shrimp |  | x | x |  | x |  |
+| 6 | Giant mantis shrimp | x |  | x |  |  | x |
+| 7 | Ciliated false squilla |  | x | x | x | x |  |
 
 ### Selected measurements
 

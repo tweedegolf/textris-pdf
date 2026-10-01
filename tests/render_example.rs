@@ -14,7 +14,8 @@
 //! checklist) from data with ordinary loops and conditionals, the payoff of
 //! building the document in code. It exercises the full block vocabulary:
 //! auto-numbered and referenced headings, paragraphs with hard line breaks,
-//! tables (including fill-in and spacer cells), task lists, a boxed callout,
+//! tables (including a matrix with vertical headers, fill-in and spacer
+//! cells), task lists, a boxed callout,
 //! both numbered and lettered ordered lists, a vertical spacer, and an
 //! explicit page break.
 //!
@@ -26,10 +27,10 @@
 use std::path::Path;
 
 use textris_pdf::{
-    build::{Textris, bold, italic, mono, muted, text},
+    build::{Textris, blank, bold, cell, italic, mono, muted, text},
     fonts::Fonts,
     model::{ListMarker, SectionContent},
-    theme::em,
+    theme::{Align, TableStyle, em},
 };
 
 #[test]
@@ -268,6 +269,12 @@ struct Species {
     scientific_name: &'static str,
     strike_type: &'static str,
     max_length: &'static str,
+    /// Digs its own burrow in sediment (otherwise it occupies a rock cavity).
+    burrower: bool,
+    /// The oceans it is found in.
+    indo_pacific: bool,
+    atlantic: bool,
+    east_pacific: bool,
 }
 
 /// A single physical measurement to tabulate.
@@ -294,42 +301,70 @@ fn sample() -> Textris {
             scientific_name: "Odontodactylus scyllarus",
             strike_type: "smasher",
             max_length: "18 cm",
+            burrower: false,
+            indo_pacific: true,
+            atlantic: false,
+            east_pacific: false,
         },
         Species {
             common_name: "Zebra mantis shrimp",
             scientific_name: "Lysiosquillina maculata",
             strike_type: "spearer",
             max_length: "40 cm",
+            burrower: true,
+            indo_pacific: true,
+            atlantic: false,
+            east_pacific: false,
         },
         Species {
             common_name: "Purple-spot mantis shrimp",
             scientific_name: "Gonodactylus smithii",
             strike_type: "smasher",
             max_length: "10 cm",
+            burrower: false,
+            indo_pacific: true,
+            atlantic: false,
+            east_pacific: false,
         },
         Species {
             common_name: "Caribbean rock mantis shrimp",
             scientific_name: "Neogonodactylus oerstedii",
             strike_type: "smasher",
             max_length: "7 cm",
+            burrower: false,
+            indo_pacific: false,
+            atlantic: true,
+            east_pacific: false,
         },
         Species {
             common_name: "Spottail mantis shrimp",
             scientific_name: "Squilla mantis",
             strike_type: "spearer",
             max_length: "20 cm",
+            burrower: true,
+            indo_pacific: false,
+            atlantic: true,
+            east_pacific: false,
         },
         Species {
             common_name: "Giant mantis shrimp",
             scientific_name: "Hemisquilla californiensis",
             strike_type: "smasher",
             max_length: "30 cm",
+            burrower: true,
+            indo_pacific: false,
+            atlantic: false,
+            east_pacific: true,
         },
         Species {
             common_name: "Ciliated false squilla",
             scientific_name: "Pseudosquilla ciliata",
             strike_type: "spearer",
             max_length: "10 cm",
+            burrower: true,
+            indo_pacific: true,
+            atlantic: true,
+            east_pacific: false,
         },
     ];
 
@@ -588,7 +623,46 @@ fn sample() -> Textris {
         }
     });
 
-    // Section 9: measurements, a second data table, this one keyed on figures.
+    // Section 9: the same species as a trait matrix. Its header labels stand
+    // on end (rotated 90° counter-clockwise), so the mark columns stay as
+    // narrow as their single-letter marks; the marks are centered under them.
+    doc.h3_numbered("Species at a glance");
+    doc.paragraph("Strike type, shelter and range of the species above, side by side:");
+    let matrix = TableStyle {
+        align: [Align::Left; 2]
+            .into_iter()
+            .chain([Align::Center; 6])
+            .collect(),
+        ..TableStyle::matrix()
+    };
+    let mark = |yes: bool| if yes { cell("x") } else { blank() };
+    doc.table_with(|t| {
+        t.style(&matrix);
+        t.headers([
+            "",
+            "common name",
+            "smasher",
+            "spearer",
+            "digs a burrow",
+            "Indo-Pacific",
+            "Atlantic",
+            "eastern Pacific",
+        ]);
+        for (i, s) in species.iter().enumerate() {
+            t.row([
+                cell((i + 1).to_string()),
+                cell(s.common_name),
+                mark(s.strike_type == "smasher"),
+                mark(s.strike_type == "spearer"),
+                mark(s.burrower),
+                mark(s.indo_pacific),
+                mark(s.atlantic),
+                mark(s.east_pacific),
+            ]);
+        }
+    });
+
+    // Section 10: measurements, a second data table, this one keyed on figures.
     doc.h3_numbered("Selected measurements");
     doc.paragraph("Representative figures for the smashers' strike and for vision:");
     doc.table_with(|t| {
@@ -604,7 +678,7 @@ fn sample() -> Textris {
         }
     });
 
-    // Section 10: field checklist, where checkbox state comes straight from the data.
+    // Section 11: field checklist, where checkbox state comes straight from the data.
     doc.h3_numbered("Field checklist").anchor("record");
     doc.paragraph("When you observe an animal in the field, try to record the following:");
     doc.task_list(checklist.iter().map(|c| (c.required, c.description)));
@@ -628,7 +702,7 @@ fn sample() -> Textris {
     // its own page.
     doc.page_break();
 
-    // Section 11: a label table mixing prefilled cells, fill-in lines and a
+    // Section 12: a label table mixing prefilled cells, fill-in lines and a
     // tall spacer cell for free-form notes.
     doc.h3_numbered("Observation record");
     doc.label_table_with(|t| {

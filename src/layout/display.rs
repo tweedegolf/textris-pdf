@@ -128,6 +128,10 @@ pub struct TextElement {
     pub text: String,
     /// Where this run belongs in the logical structure.
     pub tag: Tagging,
+    /// Draw the run rotated 90° counter-clockwise about `(x, baseline)`, so it
+    /// reads bottom-to-top with its glyph tops facing left (vertical table
+    /// headers). The run then extends upward from `baseline` by its width.
+    pub rotated: bool,
 }
 
 /// The semantic role of a [structure node](StructNode). Mapped to a concrete

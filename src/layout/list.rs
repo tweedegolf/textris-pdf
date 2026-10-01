@@ -204,6 +204,7 @@ impl Engine<'_> {
                 glyphs: shaped.glyphs,
                 text: label,
                 tag: Tagging::Content(label_id),
+                rotated: false,
             }));
 
             // The wrapped item text: the body.

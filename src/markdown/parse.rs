@@ -2653,6 +2653,50 @@ Body.
         }
     }
 
+    #[test]
+    fn exported_text_round_trips_verbatim() {
+        let mut rng = Rng(0xAB1E_7E57);
+        let options = ParseOptions::default();
+        for _ in 0..500 {
+            // The exporter keeps text as-is, so feed it what the parser hands
+            // back: trimmed, non-empty lines without control characters.
+            let raw = random_text(&mut rng);
+            let s = raw
+                .split('\n')
+                .map(|line| line.replace(|c: char| c.is_control(), ""))
+                .map(|line| line.trim().to_string())
+                .filter(|line| !line.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n");
+            if s.is_empty() {
+                continue;
+            }
+
+            let mut doc = Textris::new();
+            doc.paragraph(s.as_str());
+            doc.bullet_list([s.as_str()]);
+            doc.h2(s.as_str());
+            doc.table(["h"], [[text(s.as_str())]]);
+            let markdown = doc.to_markdown();
+            let blocks = parse_markdown(&markdown, &options)
+                .unwrap_or_else(|e| panic!("for {s:?}: {e}\n---\n{markdown}"));
+
+            let [
+                Block::Paragraph(paragraph),
+                Block::BulletList(items),
+                Block::Heading { content, .. },
+                Block::Table(table),
+            ] = blocks.as_slice()
+            else {
+                panic!("for {s:?} parsed to {blocks:?}\n---\n{markdown}");
+            };
+            assert_eq!(plain_text(paragraph), s, "{markdown}");
+            assert_eq!(plain_text(&items[0]), s, "{markdown}");
+            assert_eq!(plain_text(content), s.replace('\n', " "), "{markdown}");
+            assert_eq!(plain_text(table.rows[0][0].inlines()), s, "{markdown}");
+        }
+    }
+
     /// [`folded`] with newlines becoming spaces: what `mono`/`mono_cell` do.
     fn folded_mono(s: &str) -> String {
         folded(s).replace('\n', " ")

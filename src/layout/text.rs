@@ -34,11 +34,16 @@ pub(super) struct Word {
     pub(super) glyphs: Arc<[KrillaGlyph]>,
     pub(super) width: f32,
     pub(super) kind: WordKind,
+    /// Whether whitespace separates this word from the one before it. A word
+    /// without it continues the previous word in another run (the `,` after a
+    /// `**bold**` run): it is drawn without a space and the two only break
+    /// apart when they cannot share a line.
+    pub(super) space_before: bool,
 }
 
 impl Word {
     /// A glyph-less marker word (a hard break or a fill-in line).
-    fn marker(kind: WordKind, color: Option<rgb::Color>, width: f32) -> Self {
+    fn marker(kind: WordKind, color: Option<rgb::Color>, width: f32, space_before: bool) -> Self {
         Self {
             style: Style::Regular,
             color,
@@ -46,6 +51,7 @@ impl Word {
             glyphs: Vec::new().into(),
             width,
             kind,
+            space_before,
         }
     }
 }
@@ -98,12 +104,12 @@ impl Engine<'_> {
     }
 
     /// The rendered width of one line of words: word widths plus a space before
-    /// every word after the first, mirroring how [`draw_line`](Self::draw_line)
-    /// advances.
+    /// every word after the first that follows whitespace, mirroring how
+    /// [`draw_line`](Self::draw_line) advances.
     pub(super) fn line_width(&self, line: &[Word], size: f32) -> f32 {
         let mut width = 0.0;
         for (i, word) in line.iter().enumerate() {
-            if i > 0 {
+            if i > 0 && word.space_before {
                 width += self.fonts.space_width(word.style, size);
             }
             width += word.width;
@@ -127,7 +133,7 @@ impl Engine<'_> {
         while index < line.len() {
             let style = line[index].style;
             let run_color = line[index].color.unwrap_or(color);
-            if index > 0 {
+            if index > 0 && line[index].space_before {
                 x += self.fonts.space_width(style, size);
             }
             // A fill-in line draws a baseline stroke rather than glyphs, and is
@@ -169,7 +175,7 @@ impl Engine<'_> {
     }
 
     /// Concatenate same-style words into one text + glyph sequence, with a
-    /// shaped space between each pair.
+    /// shaped space between each pair that whitespace separates.
     fn merge_run(
         &self,
         words: &[Word],
@@ -184,7 +190,7 @@ impl Engine<'_> {
         let mut glyphs = Vec::new();
         let mut width = 0.0;
         for (i, word) in words.iter().enumerate() {
-            if i > 0 {
+            if i > 0 && word.space_before {
                 append_glyphs(&mut glyphs, &space.glyphs, text.len());
                 text.push(' ');
                 width += space.width(size);
@@ -199,7 +205,8 @@ impl Engine<'_> {
     /// Shape each whitespace-separated word of the inlines into a [`Word`].
     /// Newlines become hard-break markers, honored by [`wrap`](Self::wrap);
     /// all other breaking whitespace (tabs, `\r`, …) separates words like a
-    /// space. Non-breaking spaces stay inside their word.
+    /// space. Non-breaking spaces stay inside their word. Runs only separate
+    /// words where their text has whitespace, so `**bold**,` stays one word.
     pub(super) fn tokenize(
         &self,
         inlines: &[Inline],
@@ -211,49 +218,68 @@ impl Engine<'_> {
             c.is_whitespace() && !matches!(c, '\u{A0}' | '\u{202F}' | '\u{2007}')
         }
         let mut words = Vec::new();
+        // Whether whitespace has passed since the last word, carried across
+        // runs.
+        let mut space = false;
         for inline in inlines {
             let style = inline.resolve_style(base_bold, base_italic);
             let color = inline.color.map(|c| c.resolve(&self.theme.palette));
             // A fill-in run is an atomic blank, not text to be tokenized.
             if let Some(length) = inline.fill_in {
-                words.push(Word::marker(WordKind::FillIn, color, length));
+                words.push(Word::marker(WordKind::FillIn, color, length, space));
+                space = false;
                 continue;
             }
             for (index, segment) in inline.text.split('\n').enumerate() {
                 if index > 0 {
-                    words.push(Word::marker(WordKind::HardBreak, None, 0.0));
+                    words.push(Word::marker(WordKind::HardBreak, None, 0.0, false));
                 }
-                for token in segment.split(breaks_words) {
-                    if token.is_empty() {
-                        continue;
+                for (i, token) in segment.split(breaks_words).enumerate() {
+                    space |= i > 0;
+                    if !token.is_empty() {
+                        words.push(self.shape_word(style, color, token, size, space));
+                        space = false;
                     }
-                    words.push(self.shape_word(style, color, token, size));
                 }
             }
         }
         words
     }
 
-    /// Greedy line breaking: pack words until the next one would overflow. A
-    /// word wider than `max_width` is broken into character-level fragments so
-    /// it wraps instead of overflowing. Hard-break markers end the current
-    /// line unconditionally (two in a row yield an empty line).
+    /// Greedy line breaking: pack words until the next one would overflow,
+    /// keeping words glued without whitespace together. A glued group wider
+    /// than `max_width` breaks wherever it overflows: between its words, and
+    /// within a word that is too wide by itself, by character-level fragments.
+    /// Hard-break markers end the current line unconditionally (two in a row
+    /// yield an empty line).
     pub(super) fn wrap(&self, words: Vec<Word>, max_width: f32, size: f32) -> Vec<Vec<Word>> {
-        // `space_before` is false for the continuation fragments of a broken
-        // word so no space is inserted mid-word.
-        let mut pieces: Vec<(Word, bool)> = Vec::new();
-        for word in words {
-            // Only text can be split; a fill-in line is atomic.
-            if word.width > max_width + FIT_EPSILON && word.kind == WordKind::Text {
-                for (i, frag) in self
-                    .break_word(&word, max_width, size)
-                    .into_iter()
-                    .enumerate()
+        // The units a line may not break inside.
+        let mut units: Vec<Vec<Word>> = Vec::new();
+        let mut words = words.into_iter().peekable();
+        while let Some(word) = words.next() {
+            let mut group = vec![word];
+            if group[0].kind != WordKind::HardBreak {
+                while let Some(next) =
+                    words.next_if(|w| w.kind != WordKind::HardBreak && !w.space_before)
                 {
-                    pieces.push((frag, i == 0));
+                    group.push(next);
                 }
-            } else {
-                pieces.push((word, true));
+            }
+            if group.iter().map(|w| w.width).sum::<f32>() <= max_width + FIT_EPSILON {
+                units.push(group);
+                continue;
+            }
+            for word in group {
+                // Only text can be split; a fill-in line is atomic.
+                if word.width > max_width + FIT_EPSILON && word.kind == WordKind::Text {
+                    units.extend(
+                        self.break_word(&word, max_width, size)
+                            .into_iter()
+                            .map(|fragment| vec![fragment]),
+                    );
+                } else {
+                    units.push(vec![word]);
+                }
             }
         }
 
@@ -261,24 +287,25 @@ impl Engine<'_> {
         let mut line: Vec<Word> = Vec::new();
         let mut width = 0.0;
 
-        for (word, space_before) in pieces {
-            if word.kind == WordKind::HardBreak {
+        for unit in units {
+            if unit[0].kind == WordKind::HardBreak {
                 lines.push(std::mem::take(&mut line));
                 width = 0.0;
                 continue;
             }
-            let space = if line.is_empty() || !space_before {
+            let unit_width: f32 = unit.iter().map(|w| w.width).sum();
+            let space = if line.is_empty() || !unit[0].space_before {
                 0.0
             } else {
-                self.fonts.space_width(word.style, size)
+                self.fonts.space_width(unit[0].style, size)
             };
-            if !line.is_empty() && width + space + word.width > max_width + FIT_EPSILON {
+            if !line.is_empty() && width + space + unit_width > max_width + FIT_EPSILON {
                 lines.push(std::mem::take(&mut line));
-                width = word.width;
+                width = unit_width;
             } else {
-                width += space + word.width;
+                width += space + unit_width;
             }
-            line.push(word);
+            line.extend(unit);
         }
         if !line.is_empty() {
             lines.push(line);
@@ -290,7 +317,8 @@ impl Engine<'_> {
     }
 
     /// Break an over-wide word into re-shaped character-level fragments; a
-    /// single character wider than `max_width` is emitted on its own.
+    /// single character wider than `max_width` is emitted on its own. Only the
+    /// first fragment keeps the word's space before it.
     fn break_word(&self, word: &Word, max_width: f32, size: f32) -> Vec<Word> {
         let mut fragments = Vec::new();
         let mut current = String::new();
@@ -299,20 +327,35 @@ impl Engine<'_> {
             candidate.push(ch);
             let candidate_width = self.fonts.measure(word.style, &candidate, size);
             if !current.is_empty() && candidate_width > max_width + FIT_EPSILON {
-                fragments.push(self.shape_word(word.style, word.color, &current, size));
+                let space_before = fragments.is_empty() && word.space_before;
+                fragments.push(self.shape_word(
+                    word.style,
+                    word.color,
+                    &current,
+                    size,
+                    space_before,
+                ));
                 current = ch.to_string();
             } else {
                 current = candidate;
             }
         }
         if !current.is_empty() {
-            fragments.push(self.shape_word(word.style, word.color, &current, size));
+            let space_before = fragments.is_empty() && word.space_before;
+            fragments.push(self.shape_word(word.style, word.color, &current, size, space_before));
         }
         fragments
     }
 
     /// Shape a piece of text into a [`Word`] at the given size.
-    fn shape_word(&self, style: Style, color: Option<rgb::Color>, text: &str, size: f32) -> Word {
+    fn shape_word(
+        &self,
+        style: Style,
+        color: Option<rgb::Color>,
+        text: &str,
+        size: f32,
+        space_before: bool,
+    ) -> Word {
         let shaped = self.fonts.shape(style, text);
         Word {
             style,
@@ -321,6 +364,7 @@ impl Engine<'_> {
             width: shaped.width(size),
             glyphs: shaped.glyphs,
             kind: WordKind::Text,
+            space_before,
         }
     }
 }

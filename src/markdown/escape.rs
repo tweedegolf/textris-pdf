@@ -18,6 +18,10 @@
 //! Newlines are the one non-punctuation hazard (a blank line inside data would
 //! split the enclosing block): each function folds them to the hard-break form
 //! of its context. Other control characters are dropped.
+//!
+//! The exporter's output is read by people instead, so it escapes only the
+//! characters that would otherwise be syntax ([`escape_line`]); the parser
+//! reads that back just the same.
 
 /// Escape `text` for a flow context: a paragraph, heading, list item or quote.
 ///
@@ -104,18 +108,71 @@ fn fold_and_escape(text: &str, line_break: &str, escape_punctuation: bool) -> St
     out
 }
 
-/// Backslash-escape every ASCII punctuation character, leaving all other
-/// characters (including newlines) untouched. The exporter builds on this and
-/// handles newlines per context itself.
-pub(crate) fn escape_punctuation(text: &str) -> String {
+/// Escape one line of exported text (no newlines) for people to read: only a
+/// character that would otherwise be Markdown or dialect syntax gets a
+/// backslash, so `Costa, R. (observer)` stays as written. `line_start` says
+/// whether the text opens a line, where block markers (`# `, `- `, `1. `, …)
+/// count. A trailing `\` or `<` is escaped too, as the next run continues the
+/// line.
+pub(crate) fn escape_line(text: &str, line_start: bool) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let marker = if line_start {
+        block_marker(&chars)
+    } else {
+        None
+    };
     let mut out = String::with_capacity(text.len());
-    for ch in text.chars() {
-        if ch.is_ascii_punctuation() {
+    for (i, &ch) in chars.iter().enumerate() {
+        let next = chars.get(i + 1);
+        let syntax = match ch {
+            '\\' => next.is_none_or(char::is_ascii_punctuation),
+            '*' | '_' | '`' | '[' | '|' | '~' => true,
+            // An HTML tag or autolink.
+            '<' => next.is_none_or(|&c| c.is_ascii_alphabetic() || matches!(c, '/' | '!' | '?')),
+            '&' => is_entity(&chars[i + 1..]),
+            _ => marker == Some(i),
+        };
+        if syntax {
             out.push('\\');
         }
         out.push(ch);
     }
     out
+}
+
+/// The index of the character that makes a line open a block, if any: a
+/// heading, quote, list item, rule or setext underline, or a dialect attribute
+/// line, directive, lettered item or front-matter fence.
+fn block_marker(chars: &[char]) -> Option<usize> {
+    let start = chars.iter().position(|c| !c.is_whitespace())?;
+    let rest = &chars[start..];
+    let spaced = |i: usize| rest.get(i).is_none_or(|c| c.is_whitespace());
+    let only = |marker: char| rest.iter().all(|&c| c == marker || c.is_whitespace());
+    match rest[0] {
+        '#' | '>' | '{' | '@' => Some(start),
+        '-' | '+' if spaced(1) || only(rest[0]) => Some(start),
+        '=' if only('=') => Some(start),
+        c if c.is_ascii_digit() => {
+            let digits = rest.iter().take_while(|c| c.is_ascii_digit()).count();
+            (matches!(rest.get(digits), Some('.' | ')')) && spaced(digits + 1))
+                .then_some(start + digits)
+        }
+        c if c.is_ascii_lowercase() => {
+            (rest.get(1) == Some(&'.') && spaced(2)).then_some(start + 1)
+        }
+        _ => None,
+    }
+}
+
+/// Whether the text after an `&` makes it a character reference (`&amp;`,
+/// `&#38;`), which Markdown would decode.
+fn is_entity(after: &[char]) -> bool {
+    let after = after.strip_prefix(&['#']).unwrap_or(after);
+    let name = after
+        .iter()
+        .take_while(|c| c.is_ascii_alphanumeric())
+        .count();
+    name > 0 && after.get(name) == Some(&';')
 }
 
 /// Wrap `text` in an inline code span, choosing a backtick fence long enough
@@ -184,6 +241,52 @@ mod tests {
     fn escape_cell_uses_br_for_newlines() {
         assert_eq!(escape_cell("a\n\nb"), "a<br>b");
         assert_eq!(escape_cell("x|y"), "x\\|y");
+    }
+
+    #[test]
+    fn escape_line_leaves_plain_punctuation_alone() {
+        let text = "Kandidaat nr. 18: Holthuizen, A.H. (Adrianus) 's-Gravenhage 15-02-1904 R&D!";
+        assert_eq!(escape_line(text, true), text);
+    }
+
+    #[test]
+    fn escape_line_escapes_inline_syntax() {
+        assert_eq!(
+            escape_line("*a* _b_ `c` [d] e|f ~g~", false),
+            r"\*a\* \_b\_ \`c\` \[d] e\|f \~g\~"
+        );
+        assert_eq!(escape_line("a <b> < c", false), r"a \<b> < c");
+        assert_eq!(
+            escape_line("&amp; &#38; & amp;", false),
+            r"\&amp; \&#38; & amp;"
+        );
+        // A backslash is literal unless punctuation (or the next run) follows.
+        assert_eq!(escape_line(r"C:\Users \* \", false), r"C:\Users \\\* \\");
+    }
+
+    #[test]
+    fn escape_line_escapes_block_markers_at_line_start_only() {
+        for (line, escaped) in [
+            ("# a", r"\# a"),
+            ("> a", r"\> a"),
+            ("{ a }", r"\{ a }"),
+            ("@a", r"\@a"),
+            ("- a", r"\- a"),
+            ("+ a", r"\+ a"),
+            ("---", r"\---"),
+            ("+++", r"\+++"),
+            ("==", r"\=="),
+            ("18. a", r"18\. a"),
+            ("1) a", r"1\) a"),
+            ("a. b", r"a\. b"),
+            ("  - a", r"  \- a"),
+        ] {
+            assert_eq!(escape_line(line, true), escaped);
+            assert_eq!(escape_line(line, false), line);
+        }
+        for line in ["-5 graden", "2026 begint", "ab. c", "A. b", "=a"] {
+            assert_eq!(escape_line(line, true), line);
+        }
     }
 
     #[test]

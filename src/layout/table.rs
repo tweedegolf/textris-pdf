@@ -450,8 +450,8 @@ impl Engine<'_> {
     }
 
     /// The `(min, natural)` content widths of a column across header and body:
-    /// the widest single unbreakable word, and the widest cell with each of
-    /// its (hard-break-separated) lines unwrapped.
+    /// the widest unbreakable word (glued words counting as one), and the
+    /// widest cell with each of its (hard-break-separated) lines unwrapped.
     pub(super) fn column_metrics(&self, table: &Table, column: usize) -> (f32, f32) {
         let size = self.table_font_size(&table.style);
         let mut min = 0.0_f32;
@@ -459,6 +459,7 @@ impl Engine<'_> {
         let mut consider = |cell: &Cell, italic: bool| {
             let words = self.tokenize(cell.inlines(), false, italic, size);
             let mut line_width = 0.0;
+            let mut glued_width = 0.0;
             let mut first = true;
             for word in &words {
                 if word.kind == WordKind::HardBreak {
@@ -467,11 +468,15 @@ impl Engine<'_> {
                     first = true;
                     continue;
                 }
-                if !first {
+                if first || word.space_before {
+                    glued_width = 0.0;
+                }
+                if !first && word.space_before {
                     line_width += self.fonts.space_width(word.style, size);
                 }
                 line_width += word.width;
-                min = min.max(word.width);
+                glued_width += word.width;
+                min = min.max(glued_width);
                 first = false;
             }
             natural = natural.max(line_width);

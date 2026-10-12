@@ -15,8 +15,8 @@
 //!   using Word's numbering definitions.
 //! - Tables keep their cells, per-column alignment and zebra striping, but drop
 //!   the finer metrics (custom column widths, insets, fill-in rules); a
-//!   [`Cell::FillIn`](crate::model::Cell) and an inline fill-in
-//!   ([`Inline::fill_in`]) become underscore runs.
+//!   [`Cell::FillIn`](crate::model::Cell) becomes an underscore run, and an
+//!   inline fill-in ([`Inline::fill_in`]) one about as long as the fill-in.
 //! - A callout [`Box`](crate::model::Block::Box) becomes a single-cell,
 //!   borderless table shaded with the box's background color.
 //! - Header/footer page counters become Word `PAGE`/`NUMPAGES` fields rather
@@ -42,6 +42,10 @@ use crate::{
 
 /// The monospace family used for `mono` runs.
 const MONO_FONT: &str = "Courier New";
+
+/// The advance of `_` in em in Word's fallback font (Times New Roman), also
+/// the width per underscore the Markdown parser gives a `___` fill-in.
+const UNDERSCORE_ADVANCE: f32 = 0.5;
 
 /// Translate a [`Document`] into the bytes of a Word `.docx` file.
 ///
@@ -242,7 +246,7 @@ fn list_paragraph(marker: &str, inlines: &[Inline], gap: f32, theme: &Theme) -> 
 
 /// Build a run from an inline, merging the run's own emphasis with the base
 /// emphasis of its context (e.g. a heading makes every run bold). An inline
-/// fill-in becomes an underscore run to write on, like a fill-in cell.
+/// fill-in becomes an underscore run to write on, as long as the fill-in.
 fn build_run(
     inline: &Inline,
     size: f32,
@@ -250,10 +254,12 @@ fn build_run(
     base_italic: bool,
     palette: &Palette,
 ) -> Run {
-    let text = if inline.fill_in.is_some() {
-        "__________".to_string()
-    } else {
-        inline.text.clone()
+    let text = match inline.fill_in {
+        Some(width) => {
+            let count = (width / (UNDERSCORE_ADVANCE * size)).round().max(1.0);
+            "_".repeat(count as usize)
+        }
+        None => inline.text.clone(),
     };
     let mut run = Run::new().add_text(text).size(half_points(size));
     if inline.bold || base_bold {
@@ -522,20 +528,32 @@ mod tests {
     }
 
     #[test]
-    fn an_inline_fill_in_becomes_an_underscore_run() {
-        let inline = Inline {
-            fill_in: Some(120.0),
-            ..Inline::new("")
+    fn an_inline_fill_in_becomes_an_underscore_run_as_long_as_the_fill_in() {
+        let underscores = |width: f32, size: f32| {
+            let inline = Inline {
+                fill_in: Some(width),
+                ..Inline::new("")
+            };
+            let run = build_run(&inline, size, false, false, &Palette::default());
+            let texts: Vec<String> = run
+                .children
+                .iter()
+                .filter_map(|child| match child {
+                    docx_rs::RunChild::Text(t) => Some(t.text.clone()),
+                    _ => None,
+                })
+                .collect();
+            let [text] = texts.as_slice() else {
+                panic!("one text in the run: {texts:?}");
+            };
+            assert!(text.chars().all(|c| c == '_'), "a blank to write on");
+            text.len()
         };
-        let run = build_run(&inline, 9.0, false, false, &Palette::default());
-        let texts: Vec<&str> = run
-            .children
-            .iter()
-            .filter_map(|child| match child {
-                docx_rs::RunChild::Text(t) => Some(t.text.as_str()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(texts, ["__________"], "a blank to write on");
+        // An underscore is half an em wide.
+        assert_eq!(underscores(36.0, 9.0), 8);
+        assert_eq!(underscores(36.0, 18.0), 4);
+        // A line long enough to write a sentence on stays that long.
+        assert_eq!(underscores(499.5, 9.0), 111);
+        assert_eq!(underscores(0.0, 9.0), 1);
     }
 }

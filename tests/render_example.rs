@@ -82,7 +82,7 @@ fn renders_example_to_pdf_on_disk() {
             "markdown is missing the title heading"
         );
         assert!(
-            markdown.contains(r"> **Handle with care\.**"),
+            markdown.contains("> **Handle with care.**"),
             "markdown is missing the callout blockquote"
         );
         assert!(markdown.contains("| --- |"), "markdown is missing a table");
@@ -94,12 +94,12 @@ fn renders_example_to_pdf_on_disk() {
             "markdown headings should not be numbered"
         );
         assert!(
-            markdown.contains(r#"\"Vision\""#),
+            markdown.contains(r#""Vision""#),
             "references should repeat the section title in quotes"
         );
         // The footer contents sit at the bottom, below a rule.
         assert!(
-            markdown.trim_end().ends_with(r"Revision\: `3`"),
+            markdown.trim_end().ends_with("Revision: `3`"),
             "footer contents should be at the bottom of the markdown"
         );
         assert!(

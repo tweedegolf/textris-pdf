@@ -798,6 +798,104 @@ fn tabs_separate_words_like_spaces() {
 }
 
 #[test]
+fn runs_are_only_spaced_where_their_text_has_whitespace() {
+    use crate::build::bold;
+    let fonts = test_fonts();
+    let mut doc = Textris::new();
+    doc.paragraph(
+        bold("Note")
+            .normal(": fill in ")
+            .italic("here")
+            .fill_in(40.0)
+            .normal("."),
+    );
+    let pages = layout(&doc.build(), &fonts);
+
+    let runs = texts(&pages[0]);
+    let names: Vec<&str> = runs.iter().map(|t| t.text.as_str()).collect();
+    assert_eq!(names, ["Note", ": fill in", "here", "."]);
+    let end = |t: &TextElement| t.x + fonts.measure(t.style, &t.text, t.size);
+    let space = fonts.space_width(runs[2].style, runs[2].size);
+    // ":" and the fill-in follow their runs directly, "here" after a space.
+    assert!(
+        (runs[1].x - end(runs[0])).abs() < 0.01,
+        "space before \":\""
+    );
+    assert!((runs[2].x - end(runs[1]) - space).abs() < 0.01);
+    let line = pages[0]
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            Element::Stroke { points, .. } => Some(points.clone()),
+            _ => None,
+        })
+        .expect("the fill-in line");
+    assert!(
+        (line[0].0 - end(runs[2])).abs() < 0.01,
+        "space before the fill-in"
+    );
+    assert!(
+        (runs[3].x - line[1].0).abs() < 0.01,
+        "space after the fill-in"
+    );
+}
+
+#[test]
+fn glued_runs_wrap_together_unless_they_overflow_a_line() {
+    let fonts = test_fonts();
+    let theme = Theme::default();
+    let engine = Engine::new(&fonts, &theme);
+    let size = theme.font_size.body;
+    // "aaa **bbb**,": the comma is glued to the bold word.
+    let inlines = [
+        crate::model::Inline::new("aaa "),
+        crate::model::Inline {
+            bold: true,
+            ..crate::model::Inline::new("bbb")
+        },
+        crate::model::Inline::new(","),
+    ];
+    let wrap = |max_width: f32| -> Vec<Vec<String>> {
+        let words = engine.tokenize(&inlines, false, false, size);
+        engine
+            .wrap(words, max_width, size)
+            .iter()
+            .map(|line| line.iter().map(|w| w.text.clone()).collect())
+            .collect()
+    };
+    let bbb = fonts.measure(Style::Bold, "bbb", size);
+    let comma = fonts.measure(Style::Regular, ",", size);
+    let aaa_bbb =
+        fonts.measure(Style::Regular, "aaa", size) + fonts.space_width(Style::Bold, size) + bbb;
+
+    // "aaa bbb" would fit, but the comma takes "bbb" along to the next line.
+    assert_eq!(wrap(aaa_bbb + comma / 2.0), [vec!["aaa"], vec!["bbb", ","]]);
+    // Too wide for any line, the group breaks between its runs.
+    assert_eq!(
+        wrap(bbb + comma / 2.0),
+        [vec!["aaa"], vec!["bbb"], vec![","]]
+    );
+}
+
+#[test]
+fn glued_runs_count_as_one_word_for_a_column_minimum() {
+    use crate::build::text;
+    let fonts = test_fonts();
+    let theme = Theme::default();
+    let engine = Engine::new(&fonts, &theme);
+    let mut doc = Textris::new();
+    doc.table(["h"], [[text("a ").bold("Name").normal(":")]]);
+    let document = doc.build();
+    let Some(Block::Table(table)) = document.blocks.first() else {
+        panic!("a table");
+    };
+    let size = theme.font_size.body;
+    let (min, _) = engine.column_metrics(table, 0);
+    let glued = fonts.measure(Style::Bold, "Name", size) + fonts.measure(Style::Regular, ":", size);
+    assert!((min - glued).abs() < 0.01, "min {min}, expected {glued}");
+}
+
+#[test]
 fn short_section_is_pushed_to_next_page_instead_of_splitting() {
     let fonts = test_fonts();
     let theme = Theme::default();
@@ -1565,9 +1663,10 @@ fn numbered_headings_and_references_resolve_through_the_builder() {
         "nested h4: {all:?}"
     );
     assert!(all.iter().any(|t| t.starts_with("2.")), "second h3");
-    // The reference resolves to the plain section number.
+    // The reference resolves to the plain section number, with the period
+    // following it directly.
     assert!(
-        all.iter().any(|t| t.split(' ').any(|w| w == "1")),
+        all.iter().any(|t| t == "See section 1."),
         "section reference should resolve to \"1\": {all:?}"
     );
 }

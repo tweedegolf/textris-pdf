@@ -21,7 +21,7 @@ lto = true
 codegen-units = 1
 
 [dependencies]
-harfrust = "0.13"
+harfrust = "0.14"
 krilla = { version = "0.8", default-features = false }
 # Pinned to whatever `harfrust` depends on: font tables read here are handed
 # straight to the shaper, so a second `read-fonts` version does not type-check.

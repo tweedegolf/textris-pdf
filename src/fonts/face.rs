@@ -5,12 +5,13 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use harfrust::{
-    Direction, FontRef, NormalizedCoord, ShapeOptions, ShaperData, ShaperInstance, Tag as HrTag,
-    UnicodeBuffer, Variation,
-};
+use harfrust::{Buffer, Direction, ShapeOptions, ShaperFont, Tag as HrTag};
 use krilla::text::{Font, GlyphId, KrillaGlyph, Tag as KrillaTag};
-use read_fonts::{TableProvider, tables::os2::SelectionFlags};
+use read_fonts::{
+    TableProvider,
+    model::{self, NormalizedCoord, Tables, Variation},
+    tables::os2::SelectionFlags,
+};
 
 use super::AxisTag;
 
@@ -87,15 +88,12 @@ impl Shaped {
 }
 
 /// A single loaded font face: the krilla font used for drawing plus a parsed
-/// `harfrust` font (with variations applied) used for shaping.
+/// `read-fonts` instance (with variations applied) used for shaping.
 pub(super) struct Face {
     pub(super) krilla: Font,
-    font: FontRef<'static>,
-    /// Shaping caches shared by every [`shape`](Self::shape) call; building the
-    /// per-call `Shaper` from these is cheap.
-    shaper_data: ShaperData,
-    /// The pinned variation instance (normalized coordinates).
-    instance: ShaperInstance,
+    /// The pinned variation instance. It caches the shaping tables, so the
+    /// per-call [`ShaperFont`] is cheap to build.
+    font: model::Font,
     /// Memoized shaping results; documents shape the same short runs many times.
     cache: Mutex<HashMap<String, Shaped>>,
     units_per_em: f32,
@@ -125,31 +123,29 @@ impl Face {
             .collect();
         let krilla = Font::new_variable(data.into(), index, &krilla_coords)?;
 
-        let font = FontRef::from_index(data, index).ok()?;
-        let instance = ShaperInstance::from_variations(
-            &font,
-            variations.iter().map(|(tag, value)| Variation {
-                tag: HrTag::new(tag),
-                value: *value,
-            }),
-        );
-        let shaper_data = ShaperData::new(&font);
+        let font = model::Font::new(data, index)?
+            .instance_builder()
+            .variations(
+                variations
+                    .iter()
+                    .map(|(tag, value)| Variation::new(HrTag::new(tag), *value)),
+            )
+            .build();
 
-        let coords = instance.coords();
-        let units_per_em = font.head().ok()?.units_per_em() as f32;
-        let ascender = ascender(&font, coords) as f32 / units_per_em;
-        let descender = descender(&font, coords).unsigned_abs() as f32 / units_per_em;
+        let tables = font.tables();
+        let coords = font.normalized_coords();
+        let units_per_em = tables.head().ok()?.units_per_em() as f32;
+        let ascender = ascender(tables, coords) as f32 / units_per_em;
+        let descender = descender(tables, coords).unsigned_abs() as f32 / units_per_em;
         // Prefer the font's reported cap height; fall back to the ascender for
         // faces that omit it (or report a non-positive value).
-        let cap_height = capital_height(&font, coords)
+        let cap_height = capital_height(tables, coords)
             .filter(|&c| c > 0)
             .map_or(ascender, |c| c as f32 / units_per_em);
 
         let mut face = Self {
             krilla,
             font,
-            shaper_data,
-            instance,
             cache: Mutex::new(HashMap::new()),
             units_per_em,
             ascender,
@@ -165,26 +161,27 @@ impl Face {
         if let Some(hit) = self.cache.lock().unwrap().get(text) {
             return hit.clone();
         }
-        let shaper = self
-            .shaper_data
-            .shaper(&self.font)
-            .instance(Some(&self.instance))
-            .build();
-
-        let mut buffer = UnicodeBuffer::new();
+        let mut buffer = Buffer::new();
         buffer.push_str(text);
         buffer.guess_segment_properties();
         // Shaping is left-to-right only (RTL scripts are unsupported); the
         // forced direction also keeps the cluster arithmetic below valid.
         buffer.set_direction(Direction::LeftToRight);
 
-        let output = shaper.shape(buffer, ShapeOptions::new());
-        let positions = output.glyph_positions();
-        let infos = output.glyph_infos();
+        // Only fails on API misuse: a reshaped buffer, an unset direction or a
+        // mismatched plan, none of which can happen here.
+        harfrust::shape(
+            &ShaperFont::new(&self.font),
+            &mut buffer,
+            ShapeOptions::new(),
+        )
+        .expect("fresh left-to-right buffer always shapes");
+        let positions = buffer.glyph_positions();
+        let infos = buffer.glyph_infos();
 
-        let mut glyphs = Vec::with_capacity(output.len());
+        let mut glyphs = Vec::with_capacity(buffer.len());
         let mut advance = 0.0;
-        for i in 0..output.len() {
+        for i in 0..buffer.len() {
             let pos = positions[i];
             let info = infos[i];
             let start = info.cluster as usize;
@@ -223,7 +220,7 @@ impl Face {
 // Windows metrics as fallbacks for zero hhea values. Every path applies the
 // matching MVAR delta so pinned variable-font instances get instance metrics.
 
-fn ascender(font: &FontRef, coords: &[NormalizedCoord]) -> i16 {
+fn ascender(font: &Tables, coords: &[NormalizedCoord]) -> i16 {
     let os2 = font.os2().ok();
     if let Some(os2) = &os2
         && os2.version() >= 4
@@ -245,7 +242,7 @@ fn ascender(font: &FontRef, coords: &[NormalizedCoord]) -> i16 {
     apply_metric_delta(font, coords, b"hasc", value)
 }
 
-fn descender(font: &FontRef, coords: &[NormalizedCoord]) -> i16 {
+fn descender(font: &Tables, coords: &[NormalizedCoord]) -> i16 {
     let os2 = font.os2().ok();
     if let Some(os2) = &os2
         && os2.version() >= 4
@@ -274,7 +271,7 @@ fn saturate(value: u16) -> i16 {
     i16::try_from(value).unwrap_or(i16::MAX)
 }
 
-fn capital_height(font: &FontRef, coords: &[NormalizedCoord]) -> Option<i16> {
+fn capital_height(font: &Tables, coords: &[NormalizedCoord]) -> Option<i16> {
     font.os2()
         .ok()
         .and_then(|os2| os2.s_cap_height())
@@ -283,19 +280,14 @@ fn capital_height(font: &FontRef, coords: &[NormalizedCoord]) -> Option<i16> {
 
 /// Add the MVAR delta for `tag` at `coords` to a metric, keeping the
 /// unadjusted value when the result would overflow.
-fn apply_metric_delta(
-    font: &FontRef,
-    coords: &[NormalizedCoord],
-    tag: &[u8; 4],
-    value: i16,
-) -> i16 {
+fn apply_metric_delta(font: &Tables, coords: &[NormalizedCoord], tag: &[u8; 4], value: i16) -> i16 {
     if coords.is_empty() {
         return value;
     }
     let delta = font
         .mvar()
         .ok()
-        .and_then(|mvar| mvar.metric_delta(HrTag::new(tag), coords).ok())
+        .and_then(|mvar| mvar.metric_delta(HrTag::new(tag), coords))
         .map_or(0.0, |delta| delta.to_f64() as f32);
     let adjusted = value as f32 + delta;
     if adjusted >= i16::MIN as f32 && adjusted <= i16::MAX as f32 {

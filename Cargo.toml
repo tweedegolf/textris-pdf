@@ -1,6 +1,6 @@
 [package]
 name = "textris-pdf"
-version = "0.11.1"
+version = "0.12.0"
 license = "MIT"
 edition = "2024"
 description = "Simple but opinionated document generation"
@@ -21,16 +21,22 @@ lto = true
 codegen-units = 1
 
 [dependencies]
-harfrust = "0.13"
+harfrust = "0.14"
 krilla = { version = "0.8", default-features = false }
 # Pinned to whatever `harfrust` depends on: font tables read here are handed
 # straight to the shaper, so a second `read-fonts` version does not type-check.
-read-fonts = "0.43"
-time = { version = "0.3", default-features = false, features = ["std"] }
-docx-rs = { version = "0.4", default-features = false, optional = true }
+read-fonts = "0.45"
+time = { version = "0.3.55", default-features = false, features = ["std"] }
+docx-rs = { version = "0.4.22", default-features = false, optional = true }
 
 [features]
 default = ["markdown", "markdown-parser"]
 docx = ["dep:docx-rs"]
 markdown = []
 markdown-parser = ["markdown"]
+
+# Workspace-local, like the profile above. docx-rs 0.4.22 depends on zip 8,
+# which has RUSTSEC-2026-0367, -0368 and -0369; upstream main moved to zip 9.
+# Drop this once a docx-rs release after 0.4.22 is out, and require that.
+[patch.crates-io]
+docx-rs = { git = "https://github.com/bokuweb/docx-rs", rev = "ad7fede6a7f3b61a097c28d0c39dd04626e44701" }

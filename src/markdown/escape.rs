@@ -6,50 +6,74 @@
 //! data* (names, addresses, …). Interpolated data must never be able to change
 //! document structure, so every interpolated value has to pass through one of
 //! the functions here (wire them up as the template engine's auto-escaper and
-//! filters). Two rules make this sound:
+//! filters). The escaper cannot know where in the template a value lands, so
+//! its output is made **position-independent**: it reads as the same plain
+//! text in a paragraph, heading, list item, quote or table cell, directly
+//! against an emphasis marker, or between other text. Four rules make this
+//! sound:
 //!
 //! 1. The parser reads a backslash before **any** ASCII punctuation character
 //!    as that literal character (CommonMark's rule).
-//! 2. [`escape`] and [`escape_cell`] backslash-escape **every** ASCII
-//!    punctuation character, so any character that is (or could ever become)
-//!    dialect syntax is inert. The intermediate string is machine-consumed, so
-//!    its readability does not matter.
-//!
-//! Newlines are the one non-punctuation hazard (a blank line inside data would
-//! split the enclosing block): each function folds them to the hard-break form
-//! of its context. Other control characters are dropped.
+//! 2. [`escape`] backslash-escapes **every** ASCII punctuation character, so
+//!    any character that is (or could ever become) dialect syntax is inert.
+//!    The intermediate string is machine-consumed, so its readability does
+//!    not matter.
+//! 3. Newlines are the one non-punctuation hazard (a blank line inside data
+//!    would split the enclosing block, and a heading or quote line cannot be
+//!    continued): each newline run becomes a `<br>`, the hard-break form the
+//!    parser accepts in every inline context. A value thus never spans source
+//!    lines, which also keeps parse-error line numbers aligned with the
+//!    template. Other control characters are dropped.
+//! 4. Emphasis markers must hug non-blank text, and the escaper cannot see the
+//!    markers a template puts around a value. So the output never starts or
+//!    ends with whitespace, and an empty value becomes an empty HTML comment
+//!    (`<!---->`), which the parser reads as nothing. `**{{ value }}**` is
+//!    therefore well-formed for every value.
 //!
 //! The exporter's output is read by people instead, so it escapes only the
 //! characters that would otherwise be syntax ([`escape_line`]); the parser
 //! reads that back just the same.
 
-/// Escape `text` for a flow context: a paragraph, heading, list item or quote.
+/// What the escape functions emit for a value with no visible text: an empty
+/// HTML comment, which the parser reads as nothing, so the value stays inert
+/// between emphasis markers.
+pub(crate) const EMPTY: &str = "<!---->";
+
+/// Escape `text` for any inline position: a paragraph, heading, list item,
+/// quote or table cell, directly against an emphasis marker, or between other
+/// text.
 ///
-/// Every ASCII punctuation character is backslash-escaped. Whitespace runs
-/// that contain a newline collapse to a single hard break (a `\` at the end of
-/// the line); other control characters are dropped. The parser yields the text
-/// back as a single plain run, up to that newline normalization and the
-/// trimming of outer whitespace that flow contexts perform.
+/// Every ASCII punctuation character is backslash-escaped. Outer whitespace is
+/// trimmed; an inner whitespace run that contains a newline becomes a single
+/// hard break (`<br>`); other control characters are dropped. A value with no
+/// text left becomes an empty HTML comment (`<!---->`). The parser yields the
+/// text back as a single plain run, up to that normalization.
 pub fn escape(text: &str) -> String {
-    fold_and_escape(text, "\\\n", true)
+    fold_and_escape(text, "<br>", true)
 }
 
-/// Escape `text` for a table cell: [`escape`], but newlines become `<br>`,
-/// since a cell must stay on its source line.
+/// Escape `text` for a table cell. Since [`escape`] became position
+/// independent this is the same function; use `escape` everywhere.
+#[deprecated(
+    since = "0.12.0",
+    note = "`escape` is safe in every context, cells included"
+)]
 pub fn escape_cell(text: &str) -> String {
-    fold_and_escape(text, "<br>", true)
+    escape(text)
 }
 
 /// Wrap `text` in a verbatim inline code span (a `mono` run), growing the
 /// backtick fence past any backticks inside it. Backslash escapes do not work
 /// inside a code span, hence the fence growing; for the same reason newline
 /// runs fold to a single space and other control characters are dropped (a
-/// code span cannot hold a line break). An empty `text` yields an empty
-/// string, as there is no Markdown for an empty code span.
+/// code span cannot hold a line break). There is no Markdown for an empty
+/// code span, so an empty `text` yields an empty HTML comment (`<!---->`),
+/// which the parser reads as nothing; like [`escape`], the result is safe
+/// directly against an emphasis marker.
 ///
 /// Not for table cells: use [`mono_cell`] there.
 pub fn mono(text: &str) -> String {
-    code_span(&fold_and_escape(text, " ", false))
+    code_span_or_empty(&fold_and_escape(text, " ", false))
 }
 
 /// [`mono`] for a table cell: additionally encodes `|` (as `\|`, which GitHub
@@ -67,12 +91,25 @@ pub fn mono_cell(text: &str) -> String {
             c => encoded.push(c),
         }
     }
-    code_span(&encoded)
+    code_span_or_empty(&encoded)
+}
+
+/// [`code_span`], with [`EMPTY`] for content that has no code span form.
+fn code_span_or_empty(text: &str) -> String {
+    if text.is_empty() {
+        EMPTY.to_string()
+    } else {
+        code_span(text)
+    }
 }
 
 /// The shared body of the escape functions: drop control characters, collapse
 /// every whitespace run that contains a newline to `line_break`, and (when
-/// `escape_punctuation` is set) backslash-escape all ASCII punctuation.
+/// `escape_punctuation` is set) backslash-escape all ASCII punctuation and
+/// trim leading whitespace, turning a value with no text left into [`EMPTY`].
+/// Trailing whitespace is always dropped. A code span keeps its leading
+/// whitespace: it is verbatim content there, and a backtick already separates
+/// it from any marker outside.
 fn fold_and_escape(text: &str, line_break: &str, escape_punctuation: bool) -> String {
     let mut out = String::with_capacity(text.len() * 2);
     // Whitespace is held back so a newline can swallow the spaces around it.
@@ -89,10 +126,15 @@ fn fold_and_escape(text: &str, line_break: &str, escape_punctuation: bool) -> St
                 whitespace.push(ch);
             }
         } else {
+            // A leading break or whitespace run folds away: it would dangle
+            // at the start of the value, and a block trims it anyway.
+            let leading = escape_punctuation && out.is_empty();
             if break_pending {
-                out.push_str(line_break);
+                if !leading {
+                    out.push_str(line_break);
+                }
                 break_pending = false;
-            } else {
+            } else if !leading {
                 out.push_str(&whitespace);
             }
             whitespace.clear();
@@ -102,9 +144,12 @@ fn fold_and_escape(text: &str, line_break: &str, escape_punctuation: bool) -> St
             out.push(ch);
         }
     }
-    // Trailing whitespace would read as a hard break (two trailing spaces) or
-    // dangle a break marker; both fold away, matching the trimming the parser
-    // applies at block edges.
+    // A trailing whitespace run or break is dropped too: trailing spaces would
+    // read as a hard break (two trailing spaces) at the end of a line, and a
+    // dangling break marker has nothing to break before.
+    if escape_punctuation && out.is_empty() {
+        out.push_str(EMPTY);
+    }
     out
 }
 
@@ -211,36 +256,50 @@ mod tests {
     }
 
     #[test]
-    fn escape_folds_newline_runs_to_one_hard_break() {
-        assert_eq!(escape("a\nb"), "a\\\nb");
-        assert_eq!(escape("a\n\n\nb"), "a\\\nb");
+    fn escape_folds_newline_runs_to_one_br() {
+        assert_eq!(escape("a\nb"), "a<br>b");
+        assert_eq!(escape("a\n\n\nb"), "a<br>b");
         // Spaces around the newline fold into the break.
-        assert_eq!(escape("a \n b"), "a\\\nb");
+        assert_eq!(escape("a \n b"), "a<br>b");
         // Interior whitespace without a newline is preserved.
         assert_eq!(escape("a  b"), "a  b");
+        // The output never spans source lines.
+        assert!(!escape("a\nb\r\nc\n").contains('\n'));
     }
 
     #[test]
     fn escape_drops_other_control_characters() {
         assert_eq!(escape("a\tb\u{1}c\rd"), "abcd");
         // CRLF folds like a bare newline.
-        assert_eq!(escape("a\r\nb"), "a\\\nb");
+        assert_eq!(escape("a\r\nb"), "a<br>b");
     }
 
     #[test]
-    fn escape_drops_trailing_whitespace_and_breaks() {
-        // Trailing whitespace would read as a hard break; leading whitespace
-        // is harmless (flow contexts trim it) and passes through.
-        assert_eq!(escape("  a  "), "  a");
+    fn escape_trims_outer_whitespace_and_breaks() {
+        // Trailing whitespace would read as a hard break, and either side
+        // would separate the value from an emphasis marker around it.
+        assert_eq!(escape("  a  "), "a");
+        assert_eq!(escape("\u{a0}a\u{a0}"), "a");
         assert_eq!(escape("a\n"), "a");
-        // A leading newline still breaks at the interpolation point.
-        assert_eq!(escape("\na"), "\\\na");
+        assert_eq!(escape("\n a"), "a");
     }
 
     #[test]
-    fn escape_cell_uses_br_for_newlines() {
-        assert_eq!(escape_cell("a\n\nb"), "a<br>b");
-        assert_eq!(escape_cell("x|y"), "x\\|y");
+    fn escape_of_nothing_is_an_empty_comment() {
+        for s in ["", " ", "\n", " \n\t\u{1} "] {
+            assert_eq!(escape(s), EMPTY, "{s:?}");
+        }
+        assert_eq!(mono(""), EMPTY);
+        assert_eq!(mono_cell(" "), EMPTY);
+        // Data that spells the comment stays literal.
+        assert_eq!(escape(EMPTY), r"\<\!\-\-\-\-\>");
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn escape_cell_is_escape() {
+        assert_eq!(escape_cell("a\n\nb|c"), escape("a\n\nb|c"));
+        assert_eq!(escape("x|y"), "x\\|y");
     }
 
     #[test]
@@ -293,7 +352,7 @@ mod tests {
     fn mono_wraps_verbatim_and_folds_newlines_to_spaces() {
         assert_eq!(mono("a*b_c"), "`a*b_c`");
         assert_eq!(mono("a\nb"), "`a b`");
-        assert_eq!(mono(""), "");
+        assert_eq!(mono(""), EMPTY);
     }
 
     #[test]

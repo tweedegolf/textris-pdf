@@ -11,18 +11,21 @@
 //!   documents as (templated) Markdown text instead of builder calls. The
 //!   dialect is documented in the `parse` module.
 //!
-//! The [`escape`], [`escape_cell`], [`mono`] and [`mono_cell`] functions define
-//! the escaping the parser understands. The exporter uses the same backslash
-//! escapes, but only where a character would otherwise be syntax. Host template
-//! engines interpolating untrusted data into dialect templates must run every
-//! interpolated value through them; see the `parse` module's *Escaping* section.
+//! The [`escape`], [`mono`] and [`mono_cell`] functions define the escaping
+//! the parser understands; their output is inert at any inline position of a
+//! template. The exporter uses the same backslash escapes, but only where a
+//! character would otherwise be syntax. Host template engines interpolating
+//! untrusted data into dialect templates must run every interpolated value
+//! through them; see the `parse` module's *Escaping* section.
 
 mod escape;
 mod export;
 #[cfg(feature = "markdown-parser")]
 pub mod parse;
 
-pub use escape::{escape, escape_cell, mono, mono_cell};
+#[allow(deprecated)]
+pub use escape::escape_cell;
+pub use escape::{escape, mono, mono_cell};
 pub use export::to_markdown;
 #[cfg(feature = "markdown-parser")]
 pub use parse::{MarkdownParseError, ParseOptions, parse_markdown};

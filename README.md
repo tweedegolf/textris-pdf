@@ -231,11 +231,12 @@ body blocks only and rejects front matter (it has no document to apply chrome
 to); use `Textris::push_markdown` for front matter.
 
 When templating, interpolated data must pass through the crate's escape
-functions (`markdown::escape`, `escape_cell`, `mono`, `mono_cell`) so
-untrusted values can never change document structure; wire them up as the
-template engine's auto-escaper and filters (askama: a custom escaper for the
-`.md` extension; minijinja: `set_auto_escape_callback`). Never HTML-escape a
-dialect template.
+functions (`markdown::escape`, `mono`, `mono_cell`) so untrusted values can
+never change document structure; wire them up as the template engine's
+auto-escaper and filters (askama: a custom escaper for the `.md` extension;
+minijinja: `set_auto_escape_callback`). The output of `escape` is inert
+wherever a template puts it: in a heading, a cell, directly inside `**…**`,
+and for an empty value too. Never HTML-escape a dialect template.
 
 ## Accessibility
 

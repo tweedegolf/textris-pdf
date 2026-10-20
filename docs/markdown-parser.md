@@ -9,9 +9,11 @@ where it is maintained:
   [`src/markdown/parse.rs`](../src/markdown/parse.rs) (front matter, blocks,
   attribute lines, directives, inlines, strictness).
 - **Escaping design and guarantees**:
-  [`src/markdown/escape.rs`](../src/markdown/escape.rs): `escape`,
-  `escape_cell`, `mono`, `mono_cell`, shared by the exporter, the parser and
-  host template engines. The round-trip guarantees are enforced by property
+  [`src/markdown/escape.rs`](../src/markdown/escape.rs): `escape`, `mono`,
+  `mono_cell`, shared by the exporter, the parser and host template engines.
+  The output of `escape` is position independent (inert in a heading, a cell,
+  inside emphasis markers, and for an empty value), so one auto-escaper covers
+  every interpolation. The round-trip guarantees are enforced by property
   tests in `parse.rs`.
 - **Entry points**: `markdown::parse_markdown` (free function, default
   palette, body blocks only, rejects front matter) and `Textris::push_markdown`
@@ -40,8 +42,8 @@ change document structure:
 - **askama**: register a custom escaper for the `.md` extension in
   `askama.toml` whose `Escaper` impl delegates to `textris_pdf::markdown::escape`.
   Auto-escaping then covers every `{{ }}` by default, so template authors
-  cannot forget it; expose `escape_cell` / `mono` / `mono_cell` as filters
-  (e.g. `{{ value | cell }}`). Only static template text, which is trusted,
+  cannot forget it; expose `mono` / `mono_cell` as filters (e.g.
+  `{{ value | mono }}`). Only static template text, which is trusted,
   bypasses escaping.
 - **minijinja**: the same via `set_auto_escape_callback` plus a custom
   formatter.

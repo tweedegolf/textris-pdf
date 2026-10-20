@@ -282,6 +282,11 @@ fn render_inline(inline: &Inline, context: InlineContext, line_start: bool) -> S
         return "________".to_string();
     }
     if inline.mono {
+        // An empty code span has no Markdown form; `mono("")` emits an empty
+        // comment for the parser's sake, which has no place in display output.
+        if inline.text.is_empty() {
+            return String::new();
+        }
         return match context {
             InlineContext::Flow | InlineContext::Heading => mono(&inline.text),
             InlineContext::Cell => mono_cell(&inline.text),

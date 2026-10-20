@@ -123,13 +123,14 @@
 //! | `___` (run of 3+ underscores) | [`Inline::fill_in`], width = run length × [`ParseOptions::fill_in_char_width`] |
 //! | `___(120)` | [`Inline::fill_in`] with an explicit width in points |
 //! | two trailing spaces, or `\` at end of line | hard break (`'\n'` in the run) |
-//! | `<br>` (inside table cells only) | hard break |
+//! | `<br>` | hard break, in any inline context (the only form a heading or table cell can carry) |
+//! | `<!-- comment -->` | nothing (one line; also what the escape functions emit for an empty value) |
 //! | `[#label]` | [`Inline::section_ref`] placeholder |
 //! | `\` + any ASCII punctuation | that literal character |
 //!
 //! Not supported, and a parse error where detectable: links, images, HTML
-//! other than `<br>` in cells, fenced code blocks, thematic breaks and setext
-//! headings, strikethrough, footnotes, nested lists. Emphasis supports the
+//! other than `<br>` and comments, fenced code blocks, thematic breaks and
+//! setext headings, strikethrough, footnotes, nested lists. Emphasis supports the
 //! exporter's canonical forms (markers hugging non-space text) and errors on
 //! anything unterminated. Stray text that merely *looks* like syntax (a
 //! sentence starting `a. `, a lone `_`) must be backslash-escaped; error
@@ -142,10 +143,12 @@
 //! literal backslash (CommonMark's rule). Untrusted data interpolated into a
 //! template must have every ASCII punctuation character escaped so it can
 //! never change document structure: run every interpolated value through
-//! [`escape`](super::escape) (flow contexts), [`escape_cell`](super::escape_cell)
-//! (table cells), [`mono`](super::mono) or [`mono_cell`](super::mono_cell)
-//! (verbatim spans), typically wired up as the template engine's auto-escaper
-//! and filters. See the [`escape` module docs](super::escape) for the
+//! [`escape`](super::escape) (text), [`mono`](super::mono) or
+//! [`mono_cell`](super::mono_cell) (verbatim spans), typically wired up as the
+//! template engine's auto-escaper and filters. The output of `escape` is
+//! inert at any inline position (a heading, a cell, directly inside emphasis
+//! markers, an empty value), so the auto-escaper needs no notion of where a
+//! value lands. See the [`escape` module docs](super::escape) for the
 //! guarantees.
 //!
 //! Do **not** use an HTML escaper (e.g. askama's default) for dialect
@@ -701,7 +704,11 @@ impl Parser<'_> {
             };
 
             let (block, next) = self.block(lines, i, attrs)?;
-            out.push((block, start));
+            // A paragraph that held only comments (or an interpolated value
+            // that came out empty) is nothing, not an empty block.
+            if !matches!(&block, Block::Paragraph(runs) if runs.is_empty()) {
+                out.push((block, start));
+            }
             i = next;
             if let Some(line) = lines.get(i)
                 && classify(line.text) != Kind::Blank
@@ -1334,25 +1341,31 @@ impl Parser<'_> {
                 }
                 '<' => {
                     let tag: String = chars[i..].iter().take(5).collect();
-                    if ctx == InlineContext::Cell
-                        && (tag.starts_with("<br>") || tag.starts_with("<br/>"))
-                    {
+                    if tag.starts_with("<br>") || tag.starts_with("<br/>") {
+                        // A hard break. Whitespace around it is invisible, as
+                        // around any line end.
+                        buf.truncate(buf.trim_end().len());
                         buf.push('\n');
                         i += if tag.starts_with("<br>") { 4 } else { 5 };
+                        while chars.get(i).is_some_and(|c| c.is_whitespace()) {
+                            i += 1;
+                        }
+                    } else if tag.starts_with("<!--") {
+                        // A comment yields nothing. The escape functions emit
+                        // an empty one (`<!---->`) for an empty value.
+                        let close = (i + 4..chars.len().saturating_sub(2))
+                            .find(|&j| chars[j..j + 3] == ['-', '-', '>']);
+                        let Some(close) = close else {
+                            return err(line, "unterminated HTML comment: missing `-->`");
+                        };
+                        i = close + 3;
                     } else if chars
                         .get(i + 1)
                         .is_some_and(|&c| c.is_ascii_alphabetic() || matches!(c, '/' | '!' | '?'))
                     {
                         return err(
                             line,
-                            match ctx {
-                                InlineContext::Cell => {
-                                    "HTML tags other than `<br>` are not supported: escape `<` as `\\<`"
-                                }
-                                InlineContext::Flow => {
-                                    "HTML tags are not supported (`<br>` works in table cells only): escape `<` as `\\<`"
-                                }
-                            },
+                            "HTML other than `<br>` and `<!-- comments -->` is not supported: escape `<` as `\\<`",
                         );
                     } else {
                         buf.push('<');
@@ -1675,7 +1688,7 @@ mod tests {
     use super::*;
     use crate::{
         build::{Textris, bold, cell, fill_in, text},
-        markdown::{escape, escape_cell, mono, mono_cell},
+        markdown::{escape, mono, mono_cell},
         model::plain_text,
         theme::Theme,
     };
@@ -2152,11 +2165,83 @@ mod tests {
                 .message
                 .contains("unterminated code span")
         );
-        // `<br>` outside a cell is HTML like any other.
-        assert!(parse_err("a <br> b\n").message.contains("HTML"));
+        assert!(
+            parse_err("a <!-- b\n")
+                .message
+                .contains("unterminated HTML comment")
+        );
         // But comparisons stay plain text.
         let blocks = parse("a < 5 and b > 1\n");
         assert_eq!(plain_text(paragraph_runs(&blocks[0])), "a < 5 and b > 1");
+    }
+
+    #[test]
+    fn br_is_a_hard_break_in_every_inline_context() {
+        // Whitespace around the tag is invisible, like at any line end.
+        let blocks = parse("a <br> b<br/>c\n");
+        assert_eq!(plain_text(paragraph_runs(&blocks[0])), "a\nb\nc");
+        let blocks = parse("# a<br>b\n\n> c<br>d\n\n- e<br>f\n\n| g<br>h |\n");
+        let Block::Heading { content, .. } = &blocks[0] else {
+            panic!("{blocks:?}");
+        };
+        assert_eq!(plain_text(content), "a\nb");
+        let Block::Box { content, .. } = &blocks[1] else {
+            panic!("{blocks:?}");
+        };
+        assert_eq!(plain_text(paragraph_runs(&content[0])), "c\nd");
+        let Block::BulletList(items) = &blocks[2] else {
+            panic!("{blocks:?}");
+        };
+        assert_eq!(plain_text(&items[0]), "e\nf");
+        let Cell::Text(runs) = &table(&blocks[3]).rows[0][0] else {
+            panic!("{blocks:?}");
+        };
+        assert_eq!(plain_text(runs), "g\nh");
+        // Emphasis spans it.
+        let blocks = parse("**a<br>b**\n");
+        let runs = paragraph_runs(&blocks[0]);
+        assert_eq!((runs[0].bold, runs[0].text.as_str()), (true, "a\nb"));
+    }
+
+    #[test]
+    fn comments_parse_to_nothing() {
+        let blocks = parse("a <!-- note --> b\n");
+        assert_eq!(plain_text(paragraph_runs(&blocks[0])), "a  b");
+        // A comment-only line is no block at all, so it may sit anywhere.
+        let blocks = parse("<!-- note -->\n\n# Title\n\n<!---->\n");
+        assert_eq!(blocks.len(), 1);
+        assert!(matches!(blocks[0], Block::Heading { .. }));
+        // An empty comment keeps emphasis markers well-formed around nothing.
+        let blocks = parse("**<!---->** and *a <!---->*\n");
+        let runs = paragraph_runs(&blocks[0]);
+        assert_eq!(runs.len(), 2);
+        assert_eq!((runs[0].bold, runs[0].text.as_str()), (false, " and "));
+        assert_eq!((runs[1].italic, runs[1].text.as_str()), (true, "a "));
+        // Its cell is blank, its heading has no visible text (layout skips it).
+        let blocks = parse("| <!----> |\n\n# <!---->\n");
+        assert!(matches!(table(&blocks[0]).rows[0][0], Cell::Blank));
+        let Block::Heading { content, .. } = &blocks[1] else {
+            panic!("{blocks:?}");
+        };
+        assert!(content.is_empty());
+    }
+
+    #[test]
+    fn escaped_data_reported_as_failing_in_headings_quotes_and_emphasis_parses() {
+        // The cases from the report on textris-pdf 0.11.1, verbatim.
+        let options = ParseOptions::default();
+        for (name, src) in [
+            ("heading, newline", format!("# {}", escape("a\nb"))),
+            ("heading, leading newline", format!("# {}", escape("\na"))),
+            ("quote, newline", format!("> {}", escape("a\nb"))),
+            ("strong, leading space", format!("**{}**", escape(" a"))),
+            ("strong, leading nbsp", format!("**{}**", escape("\u{a0}a"))),
+            ("emphasis, leading space", format!("*{}*", escape(" a"))),
+            ("strong, empty", format!("**{}**", escape(""))),
+            ("mono, empty", format!("**{}**", mono(""))),
+        ] {
+            parse_markdown(&src, &options).unwrap_or_else(|e| panic!("{name}: {src:?} -> {e}"));
+        }
     }
 
     #[test]
@@ -2565,12 +2650,10 @@ Body.
             let blocks = parse_markdown(&source, &options)
                 .unwrap_or_else(|e| panic!("escape({s:?}) = {source:?} failed: {e}"));
             if expected.is_empty() {
-                let text = match blocks.as_slice() {
-                    [] => String::new(),
-                    [Block::Paragraph(runs)] => plain_text(runs),
-                    other => panic!("escape({s:?}) = {source:?} parsed to {other:?}"),
-                };
-                assert_eq!(text, expected, "for {s:?} via {source:?}");
+                assert!(
+                    blocks.is_empty(),
+                    "escape({s:?}) = {source:?} parsed to {blocks:?}"
+                );
                 continue;
             }
             let [Block::Paragraph(runs)] = blocks.as_slice() else {
@@ -2593,14 +2676,12 @@ Body.
         let options = ParseOptions::default();
         for _ in 0..500 {
             let s = random_text(&mut rng);
-            let source = format!("| {} |\n", escape_cell(&s));
-            let expected = folded(&s)
-                .trim_matches(|c: char| c.is_whitespace() && c != '\n')
-                .to_string();
+            let source = format!("| {} |\n", escape(&s));
+            let expected = folded(&s).trim().to_string();
             let blocks = parse_markdown(&source, &options)
-                .unwrap_or_else(|e| panic!("escape_cell({s:?}) = {source:?} failed: {e}"));
+                .unwrap_or_else(|e| panic!("escape({s:?}) = {source:?} failed: {e}"));
             let [Block::Table(t)] = blocks.as_slice() else {
-                panic!("escape_cell({s:?}) = {source:?} parsed to {blocks:?}");
+                panic!("escape({s:?}) = {source:?} parsed to {blocks:?}");
             };
             assert_eq!(t.rows.len(), 1);
             assert_eq!(t.rows[0].len(), 1);
@@ -2611,7 +2692,80 @@ Body.
                     assert!(!runs[0].bold && !runs[0].italic && !runs[0].mono);
                     assert_eq!(runs[0].text, expected, "for {s:?} via {source:?}");
                 }
-                other => panic!("escape_cell({s:?}) parsed to {other:?}"),
+                other => panic!("escape({s:?}) parsed to {other:?}"),
+            }
+        }
+    }
+
+    /// The inline runs at the interpolation point of a one-value template:
+    /// the content of whichever single block (or cell) the template produced,
+    /// or nothing when the value produced no block.
+    fn interpolated_runs(blocks: &[Block]) -> &[Inline] {
+        match blocks {
+            [] => &[],
+            [Block::Paragraph(runs)] => runs,
+            [Block::Heading { content, .. }] => content,
+            [Block::Box { content, .. }] => interpolated_runs(content),
+            [Block::BulletList(items)] | [Block::OrderedList { items, .. }] => &items[0],
+            [Block::Table(t)] => match &t.rows[0][0] {
+                Cell::Blank => &[],
+                Cell::Text(runs) => runs,
+                other => panic!("{other:?}"),
+            },
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn escaped_text_is_inert_at_every_inline_position() {
+        // (template, text before the value, text after it, bold, italic)
+        const POSITIONS: &[(&str, &str, &str, bool, bool)] = &[
+            ("{}", "", "", false, false),
+            ("# {}", "", "", false, false),
+            ("> {}", "", "", false, false),
+            ("- {}", "", "", false, false),
+            ("1. {}", "", "", false, false),
+            ("| {} |", "", "", false, false),
+            ("x{}y", "x", "y", false, false),
+            ("**{}**", "", "", true, false),
+            ("*{}*", "", "", false, true),
+            ("***{}***", "", "", true, true),
+            // Template whitespace next to a value that may come out empty.
+            ("*a {}*", "a ", "", false, true),
+            ("**{} b**", "", " b", true, false),
+        ];
+        let mut rng = Rng(0x1D1E_7A11);
+        let options = ParseOptions::default();
+        for _ in 0..300 {
+            let s = random_text(&mut rng);
+            let value = escape(&s);
+            let text = folded(&s).trim().to_string();
+            for &(template, before, after, bold, italic) in POSITIONS {
+                let source = format!("{}\n", template.replace("{}", &value));
+                let blocks = parse_markdown(&source, &options).unwrap_or_else(|e| {
+                    panic!("escape({s:?}) in {template:?} = {source:?} failed: {e}")
+                });
+                let runs = interpolated_runs(&blocks);
+                let expected = format!("{before}{text}{after}");
+                if expected.trim().is_empty() {
+                    assert!(
+                        runs.is_empty(),
+                        "escape({s:?}) in {template:?} = {source:?} gave {runs:?}"
+                    );
+                    continue;
+                }
+                assert_eq!(
+                    runs.len(),
+                    1,
+                    "escape({s:?}) in {template:?} = {source:?} gave {runs:?}"
+                );
+                let run = &runs[0];
+                assert_eq!(
+                    (run.text.as_str(), run.bold, run.italic, run.mono),
+                    (expected.as_str(), bold, italic, false),
+                    "escape({s:?}) in {template:?} = {source:?}"
+                );
+                assert!(run.section_ref.is_none() && run.fill_in.is_none());
             }
         }
     }
@@ -2623,9 +2777,14 @@ Body.
         for _ in 0..500 {
             let s = random_text(&mut rng);
             let flow = mono(&s);
-            if !flow.is_empty() {
-                let blocks = parse_markdown(&flow, &options)
-                    .unwrap_or_else(|e| panic!("mono({s:?}) = {flow:?} failed: {e}"));
+            let blocks = parse_markdown(&flow, &options)
+                .unwrap_or_else(|e| panic!("mono({s:?}) = {flow:?} failed: {e}"));
+            if folded_mono(&s).is_empty() {
+                assert!(
+                    blocks.is_empty(),
+                    "mono({s:?}) = {flow:?} parsed to {blocks:?}"
+                );
+            } else {
                 let [Block::Paragraph(runs)] = blocks.as_slice() else {
                     panic!("mono({s:?}) = {flow:?} parsed to {blocks:?}");
                 };

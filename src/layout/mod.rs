@@ -11,6 +11,8 @@
 mod display;
 mod list;
 mod table;
+#[cfg(feature = "docx")]
+pub(crate) use table::distribute_columns;
 #[cfg(test)]
 mod tests;
 mod text;

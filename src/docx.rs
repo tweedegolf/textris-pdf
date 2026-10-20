@@ -13,10 +13,14 @@
 //!   outline level so they show up in Word's navigation pane; no named styles.
 //! - Lists render their marker (`•`, `1.`, `☐`/`☑`) as literal text rather than
 //!   using Word's numbering definitions.
-//! - Tables keep their cells, per-column alignment and zebra striping, but drop
-//!   the finer metrics (custom column widths, insets, fill-in rules); a
-//!   [`Cell::FillIn`](crate::model::Cell) becomes an underscore run, and an
-//!   inline fill-in ([`Inline::fill_in`]) one about as long as the fill-in.
+//! - Tables keep their cells, per-column alignment, zebra striping and cell
+//!   insets. Columns are sized by the same model as in the PDF (auto, label or
+//!   custom widths), but with content widths *estimated* from character counts
+//!   rather than measured with fonts, since the export has none; the widths go
+//!   into a fixed table grid so Word and LibreOffice keep them. Fill-in rules
+//!   are dropped: a [`Cell::FillIn`](crate::model::Cell) becomes an underscore
+//!   run, and an inline fill-in ([`Inline::fill_in`]) one about as long as the
+//!   fill-in.
 //! - A callout [`Box`](crate::model::Block::Box) becomes a single-cell,
 //!   borderless table shaded with the box's background color.
 //! - Header/footer page counters become Word `PAGE`/`NUMPAGES` fields rather
@@ -31,12 +35,14 @@ use std::io::{self, Cursor};
 use docx_rs::{
     AlignmentType, BreakType, Docx, FieldCharType, Footer, Header, InstrNUMPAGES, InstrPAGE,
     InstrText, LineSpacing, LineSpacingType, PageMargin, Paragraph, Run, RunFonts, Shading,
-    ShdType, SpecialIndentType, Table as DocxTable, TableCell, TableRow, VAlignType, WidthType,
+    ShdType, SpecialIndentType, Table as DocxTable, TableCell, TableCellMargins, TableLayoutType,
+    TableRow, VAlignType, WidthType,
 };
 use krilla::color::rgb;
 
 use crate::{
-    model::{Block, Cell, Chrome, Document, Inline, SectionContent},
+    layout::distribute_columns,
+    model::{Block, Cell, Chrome, Document, Inline, SectionContent, Table},
     theme::{Align, Palette, Theme, VerticalAlign},
 };
 
@@ -46,6 +52,43 @@ const MONO_FONT: &str = "Courier New";
 /// The advance of `_` in em in Word's fallback font (Times New Roman), also
 /// the width per underscore the Markdown parser gives a `___` fill-in.
 const UNDERSCORE_ADVANCE: f32 = 0.5;
+
+/// The underscore run a fill-in cell becomes.
+const FILL_IN_CELL: &str = "__________";
+
+/// The advance of a space in em, for the column width estimates.
+const SPACE_ADVANCE: f32 = 0.25;
+
+/// Headroom on the estimates: a column's widest word decides whether it wraps
+/// in Word, and bold or italic text runs about a tenth wider than the plain
+/// proportions below, so an estimate had better err wide. Applied to every
+/// estimate alike, it leaves the proportions between columns unchanged.
+const WIDTH_SAFETY: f32 = 1.2;
+
+/// A fixed allowance in em on a column's widest word, on top of
+/// [`WIDTH_SAFETY`]: measured in LibreOffice, a short bold-italic header
+/// needs about a tenth of an em beyond its advances before it stays on one
+/// line, which a percentage of a two-letter word does not cover.
+const WORD_SLACK: f32 = 0.2;
+
+/// The estimated advance of a character in em, used to size table columns
+/// without font metrics. The classes follow the proportions of a text serif
+/// (Times): capitals and `m`/`w` wide, `i`/`l`/`r`-like letters and most
+/// punctuation narrow, everything else about half an em; monospace is a flat
+/// 0.6 em and ideographs a full em.
+fn char_advance(ch: char, mono: bool) -> f32 {
+    if mono {
+        return 0.6;
+    }
+    match ch {
+        'M' | 'W' | 'm' | 'w' | '%' | '@' => 0.85,
+        'i' | 'j' | 'l' | 't' | 'f' | 'r' | 'I' => 0.35,
+        'A'..='Z' | '&' => 0.7,
+        '.' | ',' | ':' | ';' | '\'' | '"' | '!' | '|' | '(' | ')' | '[' | ']' | '-' | '/' => 0.35,
+        c if (c as u32) >= 0x2E80 => 1.0,
+        _ => 0.5,
+    }
+}
 
 /// Translate a [`Document`] into the bytes of a Word `.docx` file.
 ///
@@ -280,17 +323,21 @@ fn build_run(
 /// Build a Word table from a model table, keeping per-column alignment and
 /// zebra striping. Rows are padded to a rectangle so every row has the same
 /// number of cells.
-fn build_table(table: &crate::model::Table, theme: &Theme) -> DocxTable {
+fn build_table(table: &Table, theme: &Theme) -> DocxTable {
     let style = &table.style;
     let palette = &theme.palette;
     let columns = table.columns().max(1);
     let size = style.font_size.unwrap_or(theme.font_size.body);
+    let widths: Vec<usize> = column_widths(table, columns, size, theme)
+        .into_iter()
+        .map(|w| twips(w) as usize)
+        .collect();
 
     let mut rows = Vec::new();
     if table.has_header() {
         rows.push(build_row(
             &table.headers,
-            columns,
+            &widths,
             style,
             size,
             palette,
@@ -301,19 +348,119 @@ fn build_table(table: &crate::model::Table, theme: &Theme) -> DocxTable {
     for (index, row) in table.rows.iter().enumerate() {
         let striped = style.striped && index % 2 == 1;
         rows.push(build_row(
-            row, columns, style, size, palette, false, striped,
+            row, &widths, style, size, palette, false, striped,
         ));
     }
 
     // No borders: the zebra striping already delineates the rows, matching the
-    // PDF renderer's borderless look.
-    DocxTable::without_borders(rows).width(content_twips(theme), WidthType::Dxa)
+    // PDF renderer's borderless look. The computed widths go into the grid and
+    // a fixed layout: left to autofit, Word spreads many columns evenly and
+    // LibreOffice squeezes them, and a wide text column ends up a few
+    // characters across.
+    let inset_x = twips(theme.table.inset_x) as usize;
+    let inset_y = twips(theme.table.inset_y) as usize;
+    DocxTable::without_borders(rows)
+        .set_grid(widths.clone())
+        .layout(TableLayoutType::Fixed)
+        .margins(TableCellMargins::new().margin(inset_y, inset_x, inset_y, inset_x))
+        .width(widths.iter().sum(), WidthType::Dxa)
 }
 
-/// Build one table row, padding to `columns` cells.
+/// The column widths in points, by the sizing model the PDF layout uses, fed
+/// with content widths estimated from character counts.
+fn column_widths(table: &Table, columns: usize, size: f32, theme: &Theme) -> Vec<f32> {
+    let metrics: Vec<(f32, f32)> = (0..columns)
+        .map(|column| column_metrics(table, column, size))
+        .collect();
+    distribute_columns(
+        &table.style.columns,
+        columns,
+        &metrics,
+        2.0 * theme.table.inset_x,
+        theme.page.content_width(),
+    )
+}
+
+/// The estimated `(min, natural)` content widths of a column across header
+/// and body, in points: the widest unbreakable word and the widest unwrapped
+/// line, the same measures the PDF layout takes with real font metrics.
+fn column_metrics(table: &Table, column: usize, size: f32) -> (f32, f32) {
+    let mut min = 0.0_f32;
+    let mut natural = 0.0_f32;
+    let mut consider = |cell: &Cell| {
+        let (cell_min, cell_natural) = match cell {
+            Cell::Text(inlines) => estimate_widths(inlines, size),
+            Cell::FillIn => {
+                let w = FILL_IN_CELL.len() as f32 * UNDERSCORE_ADVANCE * size;
+                (w, w)
+            }
+            Cell::Blank | Cell::Spacer(_) => (0.0, 0.0),
+        };
+        min = min.max(cell_min);
+        natural = natural.max(cell_natural);
+    };
+    if table.has_header()
+        && let Some(cell) = table.headers.get(column)
+    {
+        consider(cell);
+    }
+    for row in &table.rows {
+        if let Some(cell) = row.get(column) {
+            consider(cell);
+        }
+    }
+    (min, natural)
+}
+
+/// Estimate the `(min, natural)` widths of a cell's runs: the widest word
+/// (glued across runs, as text without a space between runs is one word, plus
+/// [`WORD_SLACK`]) and the widest hard-break-separated line, both with
+/// [`WIDTH_SAFETY`] applied and the line never narrower than the word.
+fn estimate_widths(inlines: &[Inline], size: f32) -> (f32, f32) {
+    let mut min = 0.0_f32;
+    let mut natural = 0.0_f32;
+    let mut word = 0.0_f32;
+    let mut line = 0.0_f32;
+    let end_word = |word: &mut f32, line: &mut f32, min: &mut f32| {
+        if *word > 0.0 {
+            if *line > 0.0 {
+                *line += SPACE_ADVANCE * size;
+            }
+            *line += *word;
+            *min = min.max(*word);
+            *word = 0.0;
+        }
+    };
+    for inline in inlines {
+        if let Some(width) = inline.fill_in {
+            word += width;
+            continue;
+        }
+        for ch in inline.text.chars() {
+            if ch == '\n' {
+                end_word(&mut word, &mut line, &mut min);
+                natural = natural.max(line);
+                line = 0.0;
+            } else if ch.is_whitespace() {
+                end_word(&mut word, &mut line, &mut min);
+            } else {
+                word += char_advance(ch, inline.mono) * size;
+            }
+        }
+    }
+    end_word(&mut word, &mut line, &mut min);
+    let min = if min > 0.0 {
+        (min + WORD_SLACK * size) * WIDTH_SAFETY
+    } else {
+        0.0
+    };
+    (min, (natural.max(line) * WIDTH_SAFETY).max(min))
+}
+
+/// Build one table row with the given column widths (in twips).
 fn build_row(
     cells: &[Cell],
-    columns: usize,
+    widths: &[usize],
     style: &crate::theme::TableStyle,
     size: f32,
     palette: &Palette,
@@ -321,13 +468,16 @@ fn build_row(
     striped: bool,
 ) -> TableRow {
     let base_italic = header && style.header_italic;
-    let docx_cells = (0..columns)
-        .map(|column| {
+    let docx_cells = widths
+        .iter()
+        .enumerate()
+        .map(|(column, &width)| {
             let align = style.align.get(column).copied().unwrap_or(Align::Left);
             let paragraph =
                 cell_paragraph(cells.get(column), align, size, header, base_italic, palette);
             let mut cell = TableCell::new()
                 .add_paragraph(paragraph)
+                .width(width, WidthType::Dxa)
                 .vertical_align(vertical_alignment(style.valign));
             if striped {
                 cell = cell.shading(fill(palette.highlight));
@@ -354,7 +504,7 @@ fn cell_paragraph(
             p.add_run(build_run(inline, size, base_bold, base_italic, palette))
         }),
         Some(Cell::FillIn) => {
-            paragraph.add_run(Run::new().add_text("__________").size(half_points(size)))
+            paragraph.add_run(Run::new().add_text(FILL_IN_CELL).size(half_points(size)))
         }
         _ => paragraph,
     }
@@ -525,6 +675,162 @@ mod tests {
     #[test]
     fn empty_document_still_produces_a_valid_file() {
         assert_is_docx(&Textris::new().to_docx().unwrap());
+    }
+
+    /// The grid column widths of the first table in the document, in twips.
+    fn grid_of(doc: &Textris) -> Vec<usize> {
+        let docx = build_docx(doc.document());
+        docx.document
+            .children
+            .iter()
+            .find_map(|child| match child {
+                docx_rs::DocumentChild::Table(table) => Some(table.grid.clone()),
+                _ => None,
+            })
+            .expect("a table")
+    }
+
+    #[test]
+    fn auto_columns_give_the_text_column_the_room_and_the_rest_their_content() {
+        // Issue #20: with many columns, autofit left a long text column a few
+        // characters wide. Short columns should sit at their content width and
+        // the text column take what is left.
+        let mut doc = Textris::new();
+        doc.table(
+            ["nr", "description", "unit", "qty", "price", "total"],
+            [
+                [
+                    "1",
+                    "A long description of the first line item that wraps across the cell",
+                    "pc",
+                    "12",
+                    "9.50",
+                    "114.00",
+                ],
+                ["2", "Short", "kg", "3", "1.25", "3.75"],
+            ],
+        );
+        let grid = grid_of(&doc);
+        assert_eq!(grid.len(), 6);
+        let total: usize = grid.iter().sum();
+        let content = content_twips(&doc.document().theme);
+        assert!(
+            total.abs_diff(content) <= 6,
+            "grid {grid:?} spans {total} of {content} twips"
+        );
+        let widest = grid.iter().max().copied().unwrap();
+        assert_eq!(
+            grid[1], widest,
+            "the description column is the widest: {grid:?}"
+        );
+        assert!(
+            grid[1] > total / 2,
+            "the description column takes most of the room: {grid:?}"
+        );
+        // The short columns are near their content: the `total` column holds
+        // the widest word of them, `nr` the narrowest.
+        assert!(grid[0] < grid[5], "{grid:?}");
+        assert!(grid[5] < grid[1] / 3, "{grid:?}");
+    }
+
+    #[test]
+    fn label_tables_keep_their_split_and_every_cell_carries_its_width() {
+        let mut doc = Textris::new();
+        doc.label_table([["Name", "Ada"], ["Role", "Engineer"]]);
+        let grid = grid_of(&doc);
+        assert_eq!(grid.len(), 2);
+        assert!(
+            (grid[0] * 2).abs_diff(grid[1]) <= 2,
+            "a 1:2 split: {grid:?}"
+        );
+
+        // The layout is fixed and every cell carries its column's width, so
+        // Word honors the grid rather than autofitting.
+        use docx_rs::BuildXML;
+        let docx = build_docx(doc.document());
+        let table = docx
+            .document
+            .children
+            .iter()
+            .find_map(|child| match child {
+                docx_rs::DocumentChild::Table(table) => Some(table),
+                _ => None,
+            })
+            .unwrap();
+        let xml = String::from_utf8(table.build()).unwrap();
+        assert!(xml.contains(r#"<w:tblLayout w:type="fixed" />"#), "{xml}");
+        for (column, width) in grid.iter().enumerate() {
+            let cell_width = format!(r#"<w:tcW w:w="{width}" w:type="dxa" />"#);
+            assert_eq!(
+                xml.matches(&cell_width).count(),
+                2,
+                "column {column}: {xml}"
+            );
+        }
+    }
+
+    #[test]
+    fn estimated_widths_follow_words_and_lines() {
+        // Ten points per em; the estimates carry the safety margin, and the
+        // widest word its slack.
+        let size = 10.0;
+        let close = |a: f32, b: f32| (a - b * WIDTH_SAFETY).abs() < 1e-3;
+        let slack = WORD_SLACK * size;
+        // Digits are half an em. Two words: the natural width is both plus a
+        // space, the min the longer one.
+        let (min, natural) = estimate_widths(&[Inline::new("12 3456")], size);
+        assert!(close(min, 20.0 + slack), "{min}");
+        assert!(close(natural, 10.0 + 2.5 + 20.0), "{natural}");
+        // A hard break starts a new line; the widest line is the natural
+        // width, never narrower than the widest word.
+        let (min, natural) = estimate_widths(&[Inline::new("12345678\n12")], size);
+        assert!(close(min, 40.0 + slack), "{min}");
+        assert!(close(natural, 40.0 + slack), "{natural}");
+        // Nothing is nothing.
+        assert_eq!(estimate_widths(&[Inline::new("")], size), (0.0, 0.0));
+        // Runs without a space between them glue into one word.
+        let (min, _) = estimate_widths(&[Inline::new("12"), Inline::new("34")], size);
+        assert!(close(min, 20.0 + slack), "{min}");
+        // Capitals are wide, `i` and `l` narrow, mono flat, ideographs full.
+        let word = |text: &str, mono: bool| {
+            estimate_widths(
+                &[Inline {
+                    mono,
+                    ..Inline::new(text)
+                }],
+                size,
+            )
+            .0
+        };
+        assert!(
+            close(word("AB", false), 14.0 + slack),
+            "{}",
+            word("AB", false)
+        );
+        assert!(
+            close(word("il", false), 7.0 + slack),
+            "{}",
+            word("il", false)
+        );
+        assert!(
+            close(word("il", true), 12.0 + slack),
+            "{}",
+            word("il", true)
+        );
+        assert!(
+            close(word("日本", false), 20.0 + slack),
+            "{}",
+            word("日本", false)
+        );
+        // A fill-in is as wide as it says.
+        let (min, _) = estimate_widths(
+            &[Inline {
+                fill_in: Some(42.0),
+                ..Inline::new("")
+            }],
+            size,
+        );
+        assert!(close(min, 42.0 + slack), "{min}");
     }
 
     #[test]

@@ -74,6 +74,147 @@ pub(super) fn cap_widest_to_fit(widths: &mut [f32], total: f32) {
     }
 }
 
+/// Distribute `total` points over `columns` columns following the table's
+/// sizing `model`. `metrics` holds each column's `(min, natural)` content
+/// width (the widest unbreakable word and the widest unwrapped line; unused
+/// and may be empty for [`ColumnWidths::Labels`]) and `pad` the horizontal
+/// cell insets added to both. Shared by the PDF layout, which measures content
+/// with shaped fonts, and the docx export, which estimates it.
+pub(crate) fn distribute_columns(
+    model: &ColumnWidths,
+    columns: usize,
+    metrics: &[(f32, f32)],
+    pad: f32,
+    total: f32,
+) -> Vec<f32> {
+    if columns == 0 {
+        return Vec::new();
+    }
+
+    match model {
+        ColumnWidths::Labels => {
+            // Two columns default to a 1:2 label/value split; otherwise equal.
+            if columns == 2 {
+                vec![total / 3.0, total * 2.0 / 3.0]
+            } else {
+                vec![total / columns as f32; columns]
+            }
+        }
+        ColumnWidths::Auto => {
+            // CSS auto-table model: each column has a min width (its widest
+            // unbreakable word) and a max width (its content unwrapped);
+            // the page width is distributed between those bounds.
+            let max: Vec<f32> = metrics.iter().map(|&(_, natural)| natural + pad).collect();
+            let min: Vec<f32> = metrics.iter().map(|&(min, _)| min + pad).collect();
+            let max_total: f32 = max.iter().sum();
+            let min_total: f32 = min.iter().sum();
+
+            if max_total <= 0.0 {
+                // Every column measures zero, possible only with zero cell
+                // insets: an equal split avoids dividing by zero below.
+                return vec![total / columns as f32; columns];
+            }
+
+            if max_total <= total {
+                // Everything fits unwrapped; grow columns proportionally to
+                // fill the width.
+                let slack = total - max_total;
+                return (0..columns)
+                    .map(|c| max[c] + slack * max[c] / max_total)
+                    .collect();
+            }
+
+            if min_total <= total {
+                // Give each column its minimum, then share the rest in
+                // proportion to how much more each column could use.
+                let extra = total - min_total;
+                let flex_total: f32 = (0..columns).map(|c| max[c] - min[c]).sum();
+                return (0..columns)
+                    .map(|c| {
+                        let share = if flex_total > 0.0 {
+                            extra * (max[c] - min[c]) / flex_total
+                        } else {
+                            extra / columns as f32
+                        };
+                        min[c] + share
+                    })
+                    .collect();
+            }
+
+            // Even the minimum widths overflow the page. Cap the widest
+            // columns first: they hold the oversized words and have to
+            // hard-break anyway, while narrow columns (an index, a date)
+            // keep their minimum and stay on one line.
+            let mut widths = min;
+            cap_widest_to_fit(&mut widths, total);
+            widths
+        }
+        ColumnWidths::Custom(specs) => {
+            let min: Vec<f32> = metrics.iter().map(|&(min, _)| min + pad).collect();
+            // Columns past the end of the spec list fall back to Auto.
+            let spec = |c: usize| specs.get(c).copied().unwrap_or(ColumnWidth::Auto);
+
+            // Absolute and Auto columns claim their width first; fractional
+            // columns then split the leftover by weight.
+            let mut widths = vec![0.0_f32; columns];
+            let mut used = 0.0;
+            let mut frac_total = 0_u64;
+            for c in 0..columns {
+                match spec(c) {
+                    // A negative absolute width clamps to zero; a
+                    // non-finite one falls back to the auto width.
+                    ColumnWidth::Absolute(w) if w.is_finite() => {
+                        let w = w.max(0.0);
+                        widths[c] = w;
+                        used += w;
+                    }
+                    ColumnWidth::Absolute(_) | ColumnWidth::Auto => {
+                        let w = (metrics[c].1 + pad).max(min[c]);
+                        widths[c] = w;
+                        used += w;
+                    }
+                    ColumnWidth::Fraction(n) => frac_total += u64::from(n),
+                }
+            }
+
+            let leftover = (total - used).max(0.0);
+            for c in 0..columns {
+                if let ColumnWidth::Fraction(n) = spec(c) {
+                    let share = if frac_total > 0 {
+                        leftover * (f64::from(n) / frac_total as f64) as f32
+                    } else {
+                        0.0
+                    };
+                    widths[c] = share.max(min[c]);
+                }
+            }
+
+            // Absolute and minimum widths may claim more than the page;
+            // scale columns down, preferably the ones with slack, so
+            // the table never overflows horizontally.
+            let used: f32 = widths.iter().sum();
+            if used > total && used > 0.0 {
+                let floor: Vec<f32> = (0..columns).map(|c| widths[c].min(min[c])).collect();
+                let floor_total: f32 = floor.iter().sum();
+                let slack_total = used - floor_total;
+                if floor_total < total && slack_total > 0.0 {
+                    let excess = used - total;
+                    for c in 0..columns {
+                        widths[c] -= excess * (widths[c] - floor[c]) / slack_total;
+                    }
+                } else {
+                    // The floors alone overflow: drop every column to its
+                    // floor, then cap the widest columns until it fits.
+                    widths = floor;
+                    cap_widest_to_fit(&mut widths, total);
+                }
+            }
+
+            widths
+        }
+    }
+}
+
 impl Engine<'_> {
     /// The font size for a table's cells: its style override, or the theme body size.
     fn table_font_size(&self, style: &TableStyle) -> f32 {
@@ -313,140 +454,21 @@ impl Engine<'_> {
 
     /// Compute the width of every column within the given total content width.
     pub(super) fn column_widths(&self, table: &Table, columns: usize, total: f32) -> Vec<f32> {
-        if columns == 0 {
-            return Vec::new();
-        }
-
-        match &table.style.columns {
-            ColumnWidths::Labels => {
-                // Two columns default to a 1:2 label/value split; otherwise equal.
-                if columns == 2 {
-                    vec![total / 3.0, total * 2.0 / 3.0]
-                } else {
-                    vec![total / columns as f32; columns]
-                }
-            }
-            ColumnWidths::Auto => {
-                // CSS auto-table model: each column has a min width (its widest
-                // unbreakable word) and a max width (its content unwrapped);
-                // the page width is distributed between those bounds.
-                let pad = 2.0 * self.theme.table.inset_x;
-                let metrics: Vec<(f32, f32)> = (0..columns)
-                    .map(|c| self.column_metrics(table, c))
-                    .collect();
-                let max: Vec<f32> = metrics.iter().map(|&(_, natural)| natural + pad).collect();
-                let min: Vec<f32> = metrics.iter().map(|&(min, _)| min + pad).collect();
-                let max_total: f32 = max.iter().sum();
-                let min_total: f32 = min.iter().sum();
-
-                if max_total <= 0.0 {
-                    // Every column measures zero, possible only with zero cell
-                    // insets: an equal split avoids dividing by zero below.
-                    return vec![total / columns as f32; columns];
-                }
-
-                if max_total <= total {
-                    // Everything fits unwrapped; grow columns proportionally to
-                    // fill the width.
-                    let slack = total - max_total;
-                    return (0..columns)
-                        .map(|c| max[c] + slack * max[c] / max_total)
-                        .collect();
-                }
-
-                if min_total <= total {
-                    // Give each column its minimum, then share the rest in
-                    // proportion to how much more each column could use.
-                    let extra = total - min_total;
-                    let flex_total: f32 = (0..columns).map(|c| max[c] - min[c]).sum();
-                    return (0..columns)
-                        .map(|c| {
-                            let share = if flex_total > 0.0 {
-                                extra * (max[c] - min[c]) / flex_total
-                            } else {
-                                extra / columns as f32
-                            };
-                            min[c] + share
-                        })
-                        .collect();
-                }
-
-                // Even the minimum widths overflow the page. Cap the widest
-                // columns first: they hold the oversized words and have to
-                // hard-break anyway, while narrow columns (an index, a date)
-                // keep their minimum and stay on one line.
-                let mut widths = min;
-                cap_widest_to_fit(&mut widths, total);
-                widths
-            }
-            ColumnWidths::Custom(specs) => {
-                let pad = 2.0 * self.theme.table.inset_x;
-                let metrics: Vec<(f32, f32)> = (0..columns)
-                    .map(|c| self.column_metrics(table, c))
-                    .collect();
-                let min: Vec<f32> = metrics.iter().map(|&(min, _)| min + pad).collect();
-                // Columns past the end of the spec list fall back to Auto.
-                let spec = |c: usize| specs.get(c).copied().unwrap_or(ColumnWidth::Auto);
-
-                // Absolute and Auto columns claim their width first; fractional
-                // columns then split the leftover by weight.
-                let mut widths = vec![0.0_f32; columns];
-                let mut used = 0.0;
-                let mut frac_total = 0_u64;
-                for c in 0..columns {
-                    match spec(c) {
-                        // A negative absolute width clamps to zero; a
-                        // non-finite one falls back to the auto width.
-                        ColumnWidth::Absolute(w) if w.is_finite() => {
-                            let w = w.max(0.0);
-                            widths[c] = w;
-                            used += w;
-                        }
-                        ColumnWidth::Absolute(_) | ColumnWidth::Auto => {
-                            let w = (metrics[c].1 + pad).max(min[c]);
-                            widths[c] = w;
-                            used += w;
-                        }
-                        ColumnWidth::Fraction(n) => frac_total += u64::from(n),
-                    }
-                }
-
-                let leftover = (total - used).max(0.0);
-                for c in 0..columns {
-                    if let ColumnWidth::Fraction(n) = spec(c) {
-                        let share = if frac_total > 0 {
-                            leftover * (f64::from(n) / frac_total as f64) as f32
-                        } else {
-                            0.0
-                        };
-                        widths[c] = share.max(min[c]);
-                    }
-                }
-
-                // Absolute and minimum widths may claim more than the page;
-                // scale columns down, preferably the ones with slack, so
-                // the table never overflows horizontally.
-                let used: f32 = widths.iter().sum();
-                if used > total && used > 0.0 {
-                    let floor: Vec<f32> = (0..columns).map(|c| widths[c].min(min[c])).collect();
-                    let floor_total: f32 = floor.iter().sum();
-                    let slack_total = used - floor_total;
-                    if floor_total < total && slack_total > 0.0 {
-                        let excess = used - total;
-                        for c in 0..columns {
-                            widths[c] -= excess * (widths[c] - floor[c]) / slack_total;
-                        }
-                    } else {
-                        // The floors alone overflow: drop every column to its
-                        // floor, then cap the widest columns until it fits.
-                        widths = floor;
-                        cap_widest_to_fit(&mut widths, total);
-                    }
-                }
-
-                widths
-            }
-        }
+        let metrics: Vec<(f32, f32)> = match table.style.columns {
+            // Label columns are split by count alone; their content need not
+            // be shaped.
+            ColumnWidths::Labels => Vec::new(),
+            _ => (0..columns)
+                .map(|c| self.column_metrics(table, c))
+                .collect(),
+        };
+        distribute_columns(
+            &table.style.columns,
+            columns,
+            &metrics,
+            2.0 * self.theme.table.inset_x,
+            total,
+        )
     }
 
     /// The `(min, natural)` content widths of a column across header and body:

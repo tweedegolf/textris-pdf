@@ -436,7 +436,8 @@ impl<'a> Engine<'a> {
 
         let page = &self.theme.page;
         let (content_top, content_bottom) = (page.content_top(), page.content_bottom());
-        for index in start_page..=end_page {
+        let segments = self.pages[start_page..=end_page].iter_mut();
+        for (index, segment) in (start_page..).zip(segments) {
             let top = if index == start_page {
                 box_top
             } else {
@@ -452,7 +453,7 @@ impl<'a> Engine<'a> {
             } else {
                 content_bottom
             };
-            self.pages[index].elements.insert(
+            segment.elements.insert(
                 at,
                 Element::Rect {
                     x: box_left,

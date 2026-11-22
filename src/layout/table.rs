@@ -472,7 +472,7 @@ impl Engine<'_> {
     }
 
     /// The `(min, natural)` content widths of a column across header and body:
-    /// the widest unbreakable word (glued words counting as one), and the
+    /// the widest unbreakable run of words, and the
     /// widest cell with each of its (hard-break-separated) lines unwrapped.
     pub(super) fn column_metrics(&self, table: &Table, column: usize) -> (f32, f32) {
         let size = self.table_font_size(&table.style);
@@ -490,13 +490,17 @@ impl Engine<'_> {
                     first = true;
                     continue;
                 }
-                if first || word.space_before {
+                let space = if !first && word.space_before {
+                    self.fonts.space_width(word.style, size)
+                } else {
+                    0.0
+                };
+                if first || word.break_before {
                     glued_width = 0.0;
+                } else {
+                    glued_width += space;
                 }
-                if !first && word.space_before {
-                    line_width += self.fonts.space_width(word.style, size);
-                }
-                line_width += word.width;
+                line_width += space + word.width;
                 glued_width += word.width;
                 min = min.max(glued_width);
                 first = false;

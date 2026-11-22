@@ -472,7 +472,9 @@ fn cap_widest_to_fit_caps_only_the_widest_columns() {
 /// word wider than the page. Only that column may be squeezed below its
 /// minimum; the others keep their widest word on one line.
 fn oversized_word_table(style: &TableStyle) -> crate::model::Table {
-    let long = "https://example.org/gemeente/s-gravenhage/inwoners/lijst-2026-definitief-versie-3-goedgekeurd-door-de-raad.pdf";
+    // No break opportunity anywhere: a URL would break after its slashes and
+    // hyphens.
+    let long = "Hottentottententententoonstellingsterreinbeheerdersvergaderingsnotulenarchiefkastsleutelhanger";
     let mut doc = Textris::new();
     doc.table_styled(
         style,
@@ -855,14 +857,7 @@ fn glued_runs_wrap_together_unless_they_overflow_a_line() {
         },
         crate::model::Inline::new(","),
     ];
-    let wrap = |max_width: f32| -> Vec<Vec<String>> {
-        let words = engine.tokenize(&inlines, false, false, size);
-        engine
-            .wrap(words, max_width, size)
-            .iter()
-            .map(|line| line.iter().map(|w| w.text.clone()).collect())
-            .collect()
-    };
+    let wrap = |max_width: f32| wrapped_words(&engine, &inlines, max_width, size);
     let bbb = fonts.measure(Style::Bold, "bbb", size);
     let comma = fonts.measure(Style::Regular, ",", size);
     let aaa_bbb =
@@ -893,6 +888,91 @@ fn glued_runs_count_as_one_word_for_a_column_minimum() {
     let (min, _) = engine.column_metrics(table, 0);
     let glued = fonts.measure(Style::Bold, "Name", size) + fonts.measure(Style::Regular, ":", size);
     assert!((min - glued).abs() < 0.01, "min {min}, expected {glued}");
+}
+
+/// The text of each word on each line of `inlines` wrapped at `max_width`.
+fn wrapped_words(
+    engine: &Engine,
+    inlines: &[crate::model::Inline],
+    max_width: f32,
+    size: f32,
+) -> Vec<Vec<String>> {
+    let words = engine.tokenize(inlines, false, false, size);
+    engine
+        .wrap(words, max_width, size)
+        .iter()
+        .map(|line| line.iter().map(|w| w.text.clone()).collect())
+        .collect()
+}
+
+#[test]
+fn lines_break_after_hyphens_and_slashes_without_a_space() {
+    let fonts = test_fonts();
+    let theme = Theme::default();
+    let engine = Engine::new(&fonts, &theme);
+    let size = theme.font_size.body;
+    let measure = |text: &str| fonts.measure(Style::Regular, text, size);
+
+    let inlines = [crate::model::Inline::new("well-known example.com/path")];
+    let width = measure("example.com/") + 0.5;
+    assert_eq!(
+        wrapped_words(&engine, &inlines, width, size),
+        [vec!["well-", "known"], vec!["example.com/"], vec!["path"]]
+    );
+    // Narrower still, the hyphenated word breaks too.
+    assert_eq!(
+        wrapped_words(&engine, &inlines, measure("known") + 0.5, size)[..2],
+        [vec!["well-"], vec!["known"]]
+    );
+
+    // Sharing a line, the pieces join without a space.
+    let mut doc = Textris::new();
+    doc.paragraph("well-known example.com/path");
+    let pages = layout(&doc.build(), &fonts);
+    assert_eq!(texts(&pages[0])[0].text, "well-known example.com/path");
+}
+
+#[test]
+fn a_break_opportunity_shrinks_a_column_minimum() {
+    let fonts = test_fonts();
+    let theme = Theme::default();
+    let engine = Engine::new(&fonts, &theme);
+    let mut doc = Textris::new();
+    doc.table(["h"], [["extraordinarily-long"]]);
+    let document = doc.build();
+    let Some(Block::Table(table)) = document.blocks.first() else {
+        panic!("a table");
+    };
+    let (min, _) = engine.column_metrics(table, 0);
+    let widest = fonts.measure(Style::Regular, "extraordinarily-", theme.font_size.body);
+    assert!((min - widest).abs() < 0.01, "min {min}, expected {widest}");
+}
+
+#[test]
+fn a_fill_in_stays_glued_to_adjoining_punctuation() {
+    use crate::build::{IntoText, text};
+    let fonts = test_fonts();
+    let theme = Theme::default();
+    let engine = Engine::new(&fonts, &theme);
+    let size = theme.font_size.body;
+    let inlines = text("Name: (").fill_in(40.0).normal(").").into_inlines();
+    let words = engine.tokenize(&inlines, false, false, size);
+    let breaks: Vec<bool> = words.iter().map(|w| w.break_before).collect();
+    // "Name:", then "(", the line and ")." as one unbreakable group.
+    assert_eq!(breaks, [true, true, false, false]);
+}
+
+#[test]
+fn an_overlong_word_splits_between_grapheme_clusters() {
+    let fonts = test_fonts();
+    let theme = Theme::default();
+    let engine = Engine::new(&fonts, &theme);
+    let size = theme.font_size.body;
+    // Each "é" is an "e" plus a combining acute accent.
+    let inlines = [crate::model::Inline::new("e\u{301}".repeat(4))];
+    // Too narrow for anything but one cluster per line.
+    let lines = wrapped_words(&engine, &inlines, 1.0, size);
+    assert_eq!(lines, vec![vec!["e\u{301}"]; 4]);
 }
 
 #[test]

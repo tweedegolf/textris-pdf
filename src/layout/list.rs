@@ -6,7 +6,7 @@ use krilla::{color::rgb, tagging::ListNumbering};
 
 use crate::{
     fonts::Style,
-    layout::{Element, Engine, StructTag, Tagging, TextElement},
+    layout::{Element, Engine, StructTag, Tagging},
     model::{Inline, ListMarker, TaskItem},
 };
 
@@ -193,18 +193,16 @@ impl Engine<'_> {
             // Marker left-aligned in the indent, on the first line: the label.
             let label = marker(index);
             let label_id = self.structure.leaf(StructTag::Label);
-            let shaped = self.fonts.shape(Style::Regular, &label);
             let baseline = top + self.fonts.ascent(Style::Regular, size);
-            self.push(Element::Text(TextElement {
-                x: content_left,
+            self.draw_text(
+                Style::Regular,
+                &label,
+                content_left,
                 baseline,
                 size,
-                color: text_color,
-                style: Style::Regular,
-                glyphs: shaped.glyphs,
-                text: label,
-                tag: Tagging::Content(label_id),
-            }));
+                text_color,
+                Tagging::Content(label_id),
+            );
 
             // The wrapped item text: the body.
             let body_id = self.structure.leaf(StructTag::Body);

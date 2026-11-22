@@ -817,7 +817,8 @@ fn runs_are_only_spaced_where_their_text_has_whitespace() {
     let names: Vec<&str> = runs.iter().map(|t| t.text.as_str()).collect();
     assert_eq!(names, ["Note", ": fill in", "here", "."]);
     let end = |t: &TextElement| t.x + fonts.measure(t.style, &t.text, t.size);
-    let space = fonts.space_width(runs[2].style, runs[2].size);
+    // The space before "here" was typed in the regular run before it.
+    let space = fonts.space_width(runs[1].style, runs[1].size);
     // ":" and the fill-in follow their runs directly, "here" after a space.
     assert!(
         (runs[1].x - end(runs[0])).abs() < 0.01,
@@ -843,6 +844,252 @@ fn runs_are_only_spaced_where_their_text_has_whitespace() {
 }
 
 #[test]
+fn a_space_is_as_wide_as_the_run_it_was_typed_in() {
+    use crate::build::text;
+    let fonts = test_fonts();
+    let mut doc = Textris::new();
+    doc.paragraph(text("a ").mono("code").normal(" b"));
+    let pages = layout(&doc.build(), &fonts);
+
+    let runs = texts(&pages[0]);
+    assert_eq!(runs.len(), 3);
+    let end = |t: &TextElement| t.x + fonts.measure(t.style, &t.text, t.size);
+    // Both spaces are regular ones, not a wide monospace space before "code".
+    let space = fonts.space_width(Style::Regular, runs[0].size);
+    assert!((runs[1].x - end(runs[0]) - space).abs() < 0.01);
+    assert!((runs[2].x - end(runs[1]) - space).abs() < 0.01);
+}
+
+#[test]
+fn typographic_spaces_keep_their_own_width() {
+    let fonts = test_fonts();
+    let mut doc = Textris::new();
+    // An em space and a thin space; the run of plain spaces still collapses.
+    doc.paragraph("10\u{2003}km  or  5\u{2009}mi");
+    let pages = layout(&doc.build(), &fonts);
+    assert_eq!(texts(&pages[0])[0].text, "10\u{2003}km or 5\u{2009}mi");
+}
+
+#[test]
+fn a_line_is_shaped_as_a_whole_so_kerning_spans_its_words() {
+    let fonts = test_fonts();
+    let theme = Theme::default();
+    let engine = Engine::new(&fonts, &theme);
+    let size = theme.font_size.body;
+    let inlines = [crate::model::Inline::new("P. A. Vos and/or V/A")];
+    let words = engine.tokenize(&inlines, false, false, size);
+    let apart = engine.words_width(&words, size);
+    let drawn = engine.line_width(&words, size);
+    let whole = fonts.measure(Style::Regular, "P. A. Vos and/or V/A", size);
+    assert!((drawn - whole).abs() < 0.01, "drawn {drawn}, whole {whole}");
+    // Kerning only tightens here; line breaking budgets for the looser width.
+    assert!(drawn < apart - 0.5, "drawn {drawn}, apart {apart}");
+
+    let mut doc = Textris::new();
+    doc.paragraph("P. A. Vos and/or V/A");
+    let pages = layout(&doc.build(), &fonts);
+    let run = texts(&pages[0])[0];
+    let advance: f32 = run.glyphs.iter().map(|g| g.x_advance * run.size).sum();
+    assert!((advance - whole).abs() < 0.01);
+}
+
+#[test]
+fn a_soft_hyphen_shows_only_where_a_line_breaks_at_it() {
+    let fonts = test_fonts();
+    let theme = Theme::default();
+    let engine = Engine::new(&fonts, &theme);
+    let size = theme.font_size.body;
+    let measure = |text: &str| fonts.measure(Style::Regular, text, size);
+    let inlines = [crate::model::Inline::new("co\u{AD}operate")];
+
+    // Unbroken, the soft hyphen stays invisible.
+    let wide = measure("cooperate") + 0.5;
+    assert_eq!(
+        wrapped_words(&engine, &inlines, wide, size),
+        [vec!["co\u{AD}", "operate"]]
+    );
+    assert!((measure("co\u{AD}") - measure("co")).abs() < 0.01);
+
+    let narrow = measure("operate") + 0.5;
+    assert_eq!(
+        wrapped_words(&engine, &inlines, narrow, size),
+        [vec!["co-"], vec!["operate"]]
+    );
+
+    // "one co" fits, but not with the hyphen a break there needs.
+    let inlines = [crate::model::Inline::new("one co\u{AD}operate")];
+    let tight = measure("one co") + 0.5;
+    assert!(tight < measure("one co-"));
+    assert_eq!(
+        wrapped_words(&engine, &inlines, tight, size)[..2],
+        [vec!["one"], vec!["co-"]]
+    );
+}
+
+#[test]
+fn fragments_of_an_overlong_word_fit_and_add_up_to_it() {
+    let fonts = test_fonts();
+    let theme = Theme::default();
+    let engine = Engine::new(&fonts, &theme);
+    let size = theme.font_size.body;
+    let word = "fiffiWAVAToffluffy".repeat(8);
+    let inlines = [crate::model::Inline::new(word.clone())];
+    for max_width in [30.0, 61.3, 120.0] {
+        let lines = wrapped_words(&engine, &inlines, max_width, size);
+        assert!(lines.len() > 1);
+        assert_eq!(lines.concat().concat(), word);
+        for line in &lines {
+            let width = fonts.measure(Style::Regular, &line[0], size);
+            assert!(width <= max_width + FIT_EPSILON, "{width} > {max_width}");
+        }
+        // No line but the last has room for another letter.
+        for pair in lines.windows(2) {
+            let next = pair[1][0].chars().next().unwrap();
+            let longer = format!("{}{next}", pair[0][0]);
+            assert!(fonts.measure(Style::Regular, &longer, size) > max_width);
+        }
+    }
+}
+
+#[test]
+fn text_is_shaped_in_the_document_language() {
+    use krilla::text::Glyph;
+    let fonts = test_fonts();
+    let glyphs = |language: Option<&str>| -> Vec<u32> {
+        let mut doc = Textris::new();
+        if let Some(language) = language {
+            doc.language(language);
+        }
+        doc.paragraph("ş");
+        let pages = layout(&doc.build(), &fonts);
+        let run = texts(&pages[0])[0];
+        run.glyphs.iter().map(|g| g.glyph_id().to_u32()).collect()
+    };
+    // The test font draws a Romanian "ş" with a comma below, not a cedilla.
+    assert_eq!(glyphs(None), glyphs(Some("en")));
+    assert_ne!(glyphs(None), glyphs(Some("ro")));
+}
+
+#[test]
+fn a_character_the_font_lacks_is_drawn_from_a_fallback_face() {
+    use krilla::text::Glyph;
+    let fonts = test_fonts();
+    let missing = |t: &TextElement| t.glyphs.iter().any(|g| g.glyph_id().to_u32() == 0);
+    let runs = |fonts: &Fonts, text: &str| -> Vec<(Style, String, bool)> {
+        let mut doc = Textris::new();
+        doc.paragraph(text);
+        let pages = layout(&doc.build(), fonts);
+        texts(&pages[0])
+            .iter()
+            .map(|t| (t.style, t.text.clone(), missing(t)))
+            .collect()
+    };
+
+    // The roman face has no arrow; the monospace face does.
+    assert_eq!(
+        runs(&fonts, "a→b c"),
+        [
+            (Style::Regular, "a".to_string(), false),
+            (Style::Mono, "→".to_string(), false),
+            (Style::Regular, "b c".to_string(), false),
+        ]
+    );
+    // The pieces of the word follow each other directly.
+    let mut doc = Textris::new();
+    doc.paragraph("a→b c");
+    let pages = layout(&doc.build(), &fonts);
+    let page = texts(&pages[0]);
+    let end = |t: &TextElement| t.x + fonts.measure(t.style, &t.text, t.size);
+    assert!((page[1].x - end(page[0])).abs() < 0.01);
+    assert!((page[2].x - end(page[1])).abs() < 0.01);
+
+    // What no face has stays in its own style, as the missing glyph.
+    assert_eq!(
+        runs(&fonts, "a日b"),
+        [(Style::Regular, "a日b".to_string(), true)]
+    );
+
+    // An added fallback face is tried before the monospace one.
+    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fonts");
+    let symbols = std::fs::read(format!("{dir}/Fira_Code/FiraCode-Variable.ttf")).unwrap();
+    let fonts = test_fonts()
+        .with_fallback(crate::fonts::FaceSource::from_owned(symbols))
+        .unwrap();
+    assert_eq!(
+        runs(&fonts, "✓ ok")[0],
+        (Style::Fallback(0), "✓".to_string(), false)
+    );
+}
+
+#[test]
+fn a_list_marker_the_font_lacks_is_drawn_from_a_fallback_face() {
+    let fonts = test_fonts();
+    let theme = Theme::default();
+    let mut engine = Engine::new(&fonts, &theme);
+    engine.draw_text(
+        Style::Regular,
+        "→1",
+        10.0,
+        20.0,
+        9.0,
+        theme.palette.text,
+        Tagging::Artifact,
+    );
+    let styles: Vec<Style> = texts(engine.pages.last().unwrap())
+        .iter()
+        .map(|t| t.style)
+        .collect();
+    assert_eq!(styles, [Style::Mono, Style::Regular]);
+}
+
+/// The number of text lines on each page of a document that is a spacer
+/// leaving room for `room` lines on the first page, then one paragraph of
+/// `lines` lines.
+fn paragraph_split(room: f32, lines: usize) -> Vec<usize> {
+    let fonts = test_fonts();
+    let theme = Theme::default();
+    let line_h = theme.font_size.body * theme.spacing.line_height;
+    let mut doc = Textris::new();
+    doc.spacer((theme.page.content_bottom() - theme.page.content_top()) - room * line_h);
+    doc.paragraph(vec!["line"; lines].join("\n"));
+    let pages = layout(&doc.build(), &fonts);
+    pages.iter().map(|page| texts(page).len()).collect()
+}
+
+#[test]
+fn a_page_break_leaves_no_widow_or_orphan_in_a_paragraph() {
+    // Plenty of room: nothing moves.
+    assert_eq!(paragraph_split(6.5, 6), [6]);
+    // Room for one line only: the paragraph starts on the next page.
+    assert_eq!(paragraph_split(1.5, 6), [0, 6]);
+    // Room for all but the last line: the last two move together.
+    assert_eq!(paragraph_split(5.5, 6), [4, 2]);
+    // An ordinary break in the middle is left alone.
+    assert_eq!(paragraph_split(3.5, 6), [3, 3]);
+    // Up to three lines stay whole.
+    assert_eq!(paragraph_split(2.5, 3), [0, 3]);
+    assert_eq!(paragraph_split(1.5, 2), [0, 2]);
+    assert_eq!(paragraph_split(0.5, 1), [0, 1]);
+}
+
+#[test]
+fn a_heading_is_not_stranded_above_a_paragraph_that_moves_whole() {
+    let fonts = test_fonts();
+    let theme = Theme::default();
+    let body = theme.font_size.body * theme.spacing.line_height;
+    let heading = theme.font_size.heading(3) * theme.spacing.line_height;
+    // Room for the heading and one line of the paragraph, not two.
+    let room = heading + theme.spacing.heading_below.level(3) + 1.5 * body;
+    let mut doc = Textris::new();
+    doc.spacer((theme.page.content_bottom() - theme.page.content_top()) - room);
+    doc.h3("Title");
+    doc.paragraph(vec!["line"; 30].join("\n"));
+    let pages = layout(&doc.build(), &fonts);
+    assert_eq!(texts(&pages[0]).len(), 0);
+    assert_eq!(texts(&pages[1])[0].text, "Title");
+}
+
+#[test]
 fn glued_runs_wrap_together_unless_they_overflow_a_line() {
     let fonts = test_fonts();
     let theme = Theme::default();
@@ -861,7 +1108,7 @@ fn glued_runs_wrap_together_unless_they_overflow_a_line() {
     let bbb = fonts.measure(Style::Bold, "bbb", size);
     let comma = fonts.measure(Style::Regular, ",", size);
     let aaa_bbb =
-        fonts.measure(Style::Regular, "aaa", size) + fonts.space_width(Style::Bold, size) + bbb;
+        fonts.measure(Style::Regular, "aaa", size) + fonts.space_width(Style::Regular, size) + bbb;
 
     // "aaa bbb" would fit, but the comma takes "bbb" along to the next line.
     assert_eq!(wrap(aaa_bbb + comma / 2.0), [vec!["aaa"], vec!["bbb", ","]]);

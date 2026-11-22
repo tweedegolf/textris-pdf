@@ -2,16 +2,18 @@
 
 use std::{
     collections::HashMap,
+    ops::Range,
     sync::{Arc, Mutex},
 };
 
-use harfrust::{Buffer, Direction, ShapeOptions, ShaperFont, Tag as HrTag};
-use krilla::text::{Font, GlyphId, KrillaGlyph, Tag as KrillaTag};
+use harfrust::{Buffer, Direction, Language, ShapeOptions, ShaperFont, Tag as HrTag};
+use krilla::text::{Font, Glyph, GlyphId, KrillaGlyph, Tag as KrillaTag};
 use read_fonts::{
     TableProvider,
     model::{self, NormalizedCoord, Tables, Variation},
     tables::os2::SelectionFlags,
 };
+use unicode_segmentation::UnicodeSegmentation;
 
 use super::AxisTag;
 
@@ -85,7 +87,36 @@ impl Shaped {
     pub fn width(&self, size: f32) -> f32 {
         self.advance * size
     }
+
+    /// The parts of `text`, the text this was shaped from, that the face has
+    /// no glyphs for: whole grapheme clusters, in order, neighbours joined.
+    pub(super) fn missing(&self, text: &str) -> Vec<Range<usize>> {
+        let notdef = |glyph: &&KrillaGlyph| glyph.glyph_id().to_u32() == 0;
+        let mut missing: Vec<Range<usize>> = Vec::new();
+        if !self.glyphs.iter().any(|glyph| notdef(&glyph)) {
+            return missing;
+        }
+        for (start, grapheme) in text.grapheme_indices(true) {
+            let end = start + grapheme.len();
+            let lacks =
+                |glyph: &KrillaGlyph| glyph.text_range.start < end && start < glyph.text_range.end;
+            if !self.glyphs.iter().filter(notdef).any(lacks) {
+                continue;
+            }
+            match missing.last_mut() {
+                Some(last) if last.end == start => last.end = end,
+                _ => missing.push(start..end),
+            }
+        }
+        missing
+    }
 }
+
+/// The longest text, in bytes, whose shaping is memoized: words recur, whole
+/// lines hardly do.
+const CACHE_MAX_TEXT: usize = 32;
+/// The number of memoized shapings at which the cache starts over.
+const CACHE_CAPACITY: usize = 16_384;
 
 /// A single loaded font face: the krilla font used for drawing plus a parsed
 /// `read-fonts` instance (with variations applied) used for shaping.
@@ -94,8 +125,11 @@ pub(super) struct Face {
     /// The pinned variation instance. It caches the shaping tables, so the
     /// per-call [`ShaperFont`] is cheap to build.
     font: model::Font,
-    /// Memoized shaping results; documents shape the same short runs many times.
-    cache: Mutex<HashMap<String, Shaped>>,
+    /// Memoized shaping results; documents shape the same short runs many
+    /// times. Bounded by [`CACHE_MAX_TEXT`] and [`CACHE_CAPACITY`]: a face
+    /// lives as long as the process does. Keyed by language first: the same
+    /// text can shape differently in another one.
+    cache: Mutex<HashMap<Option<Language>, HashMap<String, Shaped>>>,
     units_per_em: f32,
     /// Ascender, normalized by units-per-em (positive, above baseline).
     pub(super) ascender: f32,
@@ -153,16 +187,27 @@ impl Face {
             cap_height,
             space_advance: 0.0,
         };
-        face.space_advance = face.shape(" ").advance;
+        face.space_advance = face.shape(" ", &None).advance;
         Some(face)
     }
 
-    pub(super) fn shape(&self, text: &str) -> Shaped {
-        if let Some(hit) = self.cache.lock().unwrap().get(text) {
+    /// Shape `text`, read as being in `language` (which selects the font's
+    /// language-specific forms, where it has any).
+    pub(super) fn shape(&self, text: &str, language: &Option<Language>) -> Shaped {
+        let cached = text.len() <= CACHE_MAX_TEXT;
+        if cached
+            && let Some(hit) = self
+                .cache
+                .lock()
+                .unwrap()
+                .get(language)
+                .and_then(|shaped| shaped.get(text))
+        {
             return hit.clone();
         }
         let mut buffer = Buffer::new();
         buffer.push_str(text);
+        buffer.set_language(language.clone());
         buffer.guess_segment_properties();
         // Shaping is left-to-right only (RTL scripts are unsupported); the
         // forced direction also keeps the cluster arithmetic below valid.
@@ -185,9 +230,12 @@ impl Face {
             let pos = positions[i];
             let info = infos[i];
             let start = info.cluster as usize;
-            // Extend the cluster to the next glyph's cluster start (LTR).
-            let end = infos
-                .get(i + 1)
+            // The cluster runs up to the next cluster's start (LTR). All the
+            // glyphs of a cluster share that range: krilla maps each to the
+            // text in its range, and an empty one would map to nothing.
+            let end = infos[i + 1..]
+                .iter()
+                .find(|next| next.cluster != info.cluster)
                 .map_or(text.len(), |next| next.cluster as usize);
 
             let x_advance = pos.x_advance as f32 / self.units_per_em;
@@ -207,10 +255,16 @@ impl Face {
             glyphs: glyphs.into(),
             advance,
         };
-        self.cache
-            .lock()
-            .unwrap()
-            .insert(text.to_owned(), shaped.clone());
+        if cached {
+            let mut cache = self.cache.lock().unwrap();
+            if cache.values().map(HashMap::len).sum::<usize>() >= CACHE_CAPACITY {
+                cache.clear();
+            }
+            cache
+                .entry(language.clone())
+                .or_default()
+                .insert(text.to_owned(), shaped.clone());
+        }
         shaped
     }
 }
@@ -294,5 +348,28 @@ fn apply_metric_delta(font: &Tables, coords: &[NormalizedCoord], tag: &[u8; 4], 
         adjusted as i16
     } else {
         value
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CACHE_CAPACITY, CACHE_MAX_TEXT};
+    use crate::fonts::test_fonts;
+
+    #[test]
+    fn the_shape_cache_is_bounded() {
+        let fonts = test_fonts();
+        let face = &fonts.regular;
+        let entries = || -> usize { face.cache.lock().unwrap().values().map(|m| m.len()).sum() };
+        let before = entries();
+        let long = "a".repeat(CACHE_MAX_TEXT + 1);
+        assert!(face.shape(&long, &None).advance > 0.0);
+        assert_eq!(entries(), before);
+
+        for i in 0..CACHE_CAPACITY + 10 {
+            face.shape(&i.to_string(), &None);
+        }
+        let len = entries();
+        assert!(0 < len && len <= CACHE_CAPACITY, "{len} entries");
     }
 }

@@ -17,12 +17,15 @@ pub(crate) use table::distribute_columns;
 mod tests;
 mod text;
 
+pub(crate) use text::collapses;
+use text::kept_lines;
+
 pub use display::{
     Element, Layout, NodeId, OutlineEntry, Page, StructNode, StructTag, Tagging, TextElement,
 };
 
 use crate::{
-    fonts::{Fonts, Style},
+    fonts::{Fonts, Shaper, Style},
     model::{Block, Document, plain_text},
     theme::{BoxStyle, Theme},
 };
@@ -42,6 +45,7 @@ const FIT_EPSILON: f32 = 0.01;
 /// tagged, accessible PDF (see [`Layout`]).
 pub fn layout(document: &Document, fonts: &Fonts) -> Layout {
     let mut engine = Engine::new(fonts, &document.theme);
+    engine.fonts = Shaper::new(fonts, document.language.as_deref());
     engine.layout_document(document);
     Layout {
         pages: engine.pages,
@@ -121,7 +125,8 @@ fn box_inner_width(style: &BoxStyle, outer: f32) -> f32 {
 }
 
 struct Engine<'a> {
-    fonts: &'a Fonts,
+    /// The fonts, shaping in the document's language.
+    fonts: Shaper<'a>,
     theme: &'a Theme,
     pages: Vec<Page>,
     /// Current vertical pen position (distance from the top of the page).
@@ -149,7 +154,7 @@ struct Engine<'a> {
 impl<'a> Engine<'a> {
     fn new(fonts: &'a Fonts, theme: &'a Theme) -> Self {
         Self {
-            fonts,
+            fonts: Shaper::new(fonts, None),
             theme,
             pages: vec![Page::default()],
             y: theme.page.content_top(),
@@ -561,14 +566,18 @@ impl<'a> Engine<'a> {
 
     /// The smallest height a block claims at the bottom of a page before its
     /// own page-breaking logic can continue it on the next one: one line for
-    /// flowing text, the first item for lists, the header plus first row (or
+    /// a heading, the lines a paragraph keeps together at its start, the first item for lists, the header plus first row (or
     /// row fragment) for tables, and the whole box for boxes (which are kept
     /// together when they fit). Used for orphan control under headings.
     fn min_start_height(&self, block: &Block, width: f32) -> f32 {
         let line = |size: f32| size * self.theme.spacing.line_height;
         match block {
             Block::Heading { level, .. } => line(self.theme.font_size.heading(*level)),
-            Block::Paragraph(_) => line(self.theme.font_size.body),
+            Block::Paragraph(inlines) => {
+                let size = self.theme.font_size.body;
+                let lines = self.paragraph_lines(inlines, size, false, false, width);
+                kept_lines(0, lines) as f32 * line(size)
+            }
             Block::Table(table) => self.table_start_height(table, width),
             Block::TaskList(items) => items
                 .first()

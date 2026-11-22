@@ -51,8 +51,10 @@ use krilla::{
 };
 
 use crate::{
-    fonts::Fonts,
-    layout::{Element, Layout, OutlineEntry, StructNode, StructTag, Tagging, TextElement},
+    fonts::{Fonts, Shaper},
+    layout::{
+        Element, Layout, OutlineEntry, StructNode, StructTag, Tagging, TextElement, collapses,
+    },
     model::{Chrome, Document, Inline},
     theme::Theme,
 };
@@ -205,6 +207,8 @@ pub fn render_many(
 
         let total = layout.pages.len();
         let theme = &document.theme;
+        // Chrome is shaped here, in the document's language like its body.
+        let shaper = Shaper::new(fonts, document.language.as_deref());
         let header_baseline = theme.page.content_top() - theme.page.header_offset;
         let footer_baseline = theme.page.content_bottom() + theme.page.footer_offset;
 
@@ -221,7 +225,7 @@ pub fn render_many(
             let page_number = index + 1;
             draw_chrome(
                 &mut surface,
-                fonts,
+                &shaper,
                 theme,
                 &document.header,
                 header_baseline,
@@ -234,7 +238,7 @@ pub fn render_many(
             }
             draw_chrome(
                 &mut surface,
-                fonts,
+                &shaper,
                 theme,
                 &document.footer,
                 footer_baseline,
@@ -414,7 +418,7 @@ fn draw_stroke(
 #[allow(clippy::too_many_arguments)]
 fn draw_chrome(
     surface: &mut Surface,
-    fonts: &Fonts,
+    fonts: &Shaper,
     theme: &Theme,
     chrome: &Chrome,
     baseline: f32,
@@ -460,13 +464,14 @@ fn draw_chrome(
     }
 }
 
-/// Chrome is a single line: fold every whitespace character (including the
-/// hard breaks body text honors) to a space and drop other control
-/// characters, which have no glyph and would fail shaping.
+/// Chrome is a single line: fold the whitespace that separates words in body
+/// text (including the hard breaks it honors there) to a space and drop other
+/// control characters, which have no glyph and would fail shaping.
+/// Typographic spaces keep their own width, as in body text.
 fn chrome_text(text: &str) -> String {
     text.chars()
         .filter_map(|c| {
-            if c.is_whitespace() {
+            if collapses(c) {
                 Some(' ')
             } else if c.is_control() {
                 None
@@ -479,12 +484,19 @@ fn chrome_text(text: &str) -> String {
 
 /// The rendered width of a sequence of styled runs, for alignment purposes.
 /// Mirrors how [`draw_spans`] advances, including fill-in blanks.
-fn spans_width(spans: &[Inline], fonts: &Fonts, size: f32) -> f32 {
+fn spans_width(spans: &[Inline], fonts: &Shaper, size: f32) -> f32 {
     spans
         .iter()
         .map(|sp| match sp.fill_in {
             Some(width) => width,
-            None => fonts.measure(sp.resolve_style(false, false), &chrome_text(&sp.text), size),
+            None => {
+                let text = chrome_text(&sp.text);
+                fonts
+                    .split(sp.resolve_style(false, false), &text)
+                    .into_iter()
+                    .map(|(face, piece)| fonts.measure(face, &text[piece], size))
+                    .sum()
+            }
         })
         .sum()
 }
@@ -495,7 +507,7 @@ fn spans_width(spans: &[Inline], fonts: &Fonts, size: f32) -> f32 {
 #[allow(clippy::too_many_arguments)]
 fn draw_spans(
     surface: &mut Surface,
-    fonts: &Fonts,
+    fonts: &Shaper,
     theme: &Theme,
     spans: &[Inline],
     mut x: f32,
@@ -522,18 +534,22 @@ fn draw_spans(
             x += width;
         } else {
             let text = chrome_text(&span.text);
-            let shaped = fonts.shape(style, &text);
             surface.set_stroke(None);
             surface.set_fill(Some(solid_fill(color)));
-            surface.draw_glyphs(
-                Point::from_xy(x, baseline),
-                &shaped.glyphs,
-                fonts.krilla_font(style),
-                &text,
-                size,
-                false,
-            );
-            x += shaped.width(size);
+            // One piece per face: a fallback draws what the style's face lacks.
+            for (face, piece) in fonts.split(style, &text) {
+                let text = &text[piece];
+                let shaped = fonts.shape(face, text);
+                surface.draw_glyphs(
+                    Point::from_xy(x, baseline),
+                    &shaped.glyphs,
+                    fonts.krilla_font(face),
+                    text,
+                    size,
+                    false,
+                );
+                x += shaped.width(size);
+            }
         }
         surface.end_tagged();
     }
@@ -668,5 +684,17 @@ fn solid_stroke(color: rgb::Color, width: f32) -> Stroke {
         paint: color.into(),
         width,
         ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::chrome_text;
+
+    #[test]
+    fn chrome_text_folds_breaks_and_keeps_typographic_spaces() {
+        assert_eq!(chrome_text("a\tb\nc\u{0}d"), "a b cd");
+        // An em space and a no-break space stay what they are, as in body text.
+        assert_eq!(chrome_text("10\u{2003}km\u{A0}x"), "10\u{2003}km\u{A0}x");
     }
 }

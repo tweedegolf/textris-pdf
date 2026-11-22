@@ -490,10 +490,10 @@ impl Engine<'_> {
                     first = true;
                     continue;
                 }
-                let space = if !first && word.space_before {
-                    self.fonts.space_width(word.style, size)
-                } else {
+                let space = if first {
                     0.0
+                } else {
+                    self.space_width(word, size)
                 };
                 if first || word.break_before {
                     glued_width = 0.0;

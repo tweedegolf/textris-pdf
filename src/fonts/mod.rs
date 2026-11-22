@@ -16,6 +16,12 @@
 //! font and before every shaping pass, so measurement and drawing agree on the
 //! exact instance.
 //!
+//! A character the face of its style has no glyph for is drawn from another
+//! face instead: first the fallback faces added with
+//! [`Fonts::with_fallback`], in order, then the monospace face (the regular
+//! one for monospace text). Only a character none of them has is drawn as the
+//! font's "missing glyph" box.
+//!
 //! Shaping is left-to-right only: right-to-left scripts (Hebrew, Arabic) are
 //! not supported and would render in the wrong visual order.
 
@@ -23,9 +29,10 @@ mod face;
 
 pub use face::{FaceSource, Shaped};
 
-use std::path::Path;
+use std::{ops::Range, path::Path};
 
 use face::Face;
+use harfrust::Language;
 use krilla::text::Font;
 
 /// A font variation axis tag, e.g. `*b"wght"` for weight.
@@ -48,6 +55,10 @@ pub enum Style {
     BoldItalic,
     /// Monospace (rendered like inline code).
     Mono,
+    /// The fallback face at this index, in the order they were added with
+    /// [`Fonts::with_fallback`]. Not a style to ask for: layout picks it for
+    /// characters the requested style's face lacks.
+    Fallback(u8),
 }
 
 /// The set of fonts used to render a document.
@@ -57,6 +68,7 @@ pub struct Fonts {
     italic: Face,
     bold_italic: Face,
     mono: Face,
+    fallbacks: Vec<Face>,
 }
 
 impl Fonts {
@@ -122,7 +134,31 @@ impl Fonts {
             italic: Face::new(italic)?,
             bold_italic: Face::new(bold_italic)?,
             mono: Face::new(mono)?,
+            fallbacks: Vec::new(),
         })
+    }
+
+    /// Add a fallback face: one that characters missing from the face of
+    /// their style are drawn from, such as a symbol or CJK font. Fallbacks
+    /// are tried in the order they were added; at most 256 are used. `None`
+    /// if the font cannot be parsed.
+    ///
+    /// ```
+    /// use textris_pdf::fonts::{FaceSource, Fonts};
+    /// static ROMAN: &[u8] =
+    ///     include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fonts/Newsreader/Newsreader-Variable.ttf"));
+    /// static ITALIC: &[u8] =
+    ///     include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fonts/Newsreader/Newsreader-Italic-Variable.ttf"));
+    /// static MONO: &[u8] =
+    ///     include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fonts/Fira_Code/FiraCode-Variable.ttf"));
+    /// let fonts = Fonts::from_variable(ROMAN, ITALIC, MONO)
+    ///     .unwrap()
+    ///     .with_fallback(FaceSource::new(MONO))
+    ///     .unwrap();
+    /// ```
+    pub fn with_fallback(mut self, source: FaceSource) -> Option<Self> {
+        self.fallbacks.push(Face::new(source)?);
+        Some(self)
     }
 
     fn face(&self, style: Style) -> &Face {
@@ -132,7 +168,25 @@ impl Fonts {
             Style::Italic => &self.italic,
             Style::BoldItalic => &self.bold_italic,
             Style::Mono => &self.mono,
+            // An index no fallback was added for can only be made up.
+            Style::Fallback(index) => self.fallbacks.get(index as usize).unwrap_or(&self.regular),
         }
+    }
+
+    /// The faces to try for text in `style`, in order: its own, the added
+    /// fallbacks, then the one built-in face likely to cover other characters.
+    fn fallback_chain(&self, style: Style) -> Vec<Style> {
+        let fallbacks = (0..=u8::MAX)
+            .take(self.fallbacks.len())
+            .map(Style::Fallback);
+        let other = match style {
+            Style::Mono => Style::Regular,
+            _ => Style::Mono,
+        };
+        std::iter::once(style)
+            .chain(fallbacks)
+            .chain([other])
+            .collect()
     }
 
     /// The krilla font for a style, needed when emitting glyphs.
@@ -142,7 +196,7 @@ impl Fonts {
 
     /// Shape a text run in the given style.
     pub fn shape(&self, style: Style, text: &str) -> Shaped {
-        self.face(style).shape(text)
+        self.face(style).shape(text, &None)
     }
 
     /// Measure the width of a text run at a font size, in points.
@@ -173,6 +227,118 @@ impl Fonts {
     }
 }
 
+/// A [`Fonts`] set shaping text in one language: what a document is laid out
+/// and drawn with, so that fonts with language-specific forms (a Dutch `ĳ`, a
+/// Turkish dotless `ı`, Serbian italics) show the right ones.
+#[derive(Clone)]
+pub(crate) struct Shaper<'a> {
+    fonts: &'a Fonts,
+    language: Option<Language>,
+}
+
+impl<'a> Shaper<'a> {
+    /// Shape with `fonts`, reading text as being in `language` (a BCP 47 tag
+    /// such as `nl`), if any.
+    pub(crate) fn new(fonts: &'a Fonts, language: Option<&str>) -> Self {
+        Self {
+            fonts,
+            language: language.and_then(Language::new),
+        }
+    }
+
+    /// See [`Fonts::krilla_font`].
+    pub(crate) fn krilla_font(&self, style: Style) -> Font {
+        self.fonts.krilla_font(style)
+    }
+
+    /// Shape a text run in the given style.
+    pub(crate) fn shape(&self, style: Style, text: &str) -> Shaped {
+        self.fonts.face(style).shape(text, &self.language)
+    }
+
+    /// See [`Fonts::measure`].
+    pub(crate) fn measure(&self, style: Style, text: &str, size: f32) -> f32 {
+        self.shape(style, text).width(size)
+    }
+
+    /// See [`Fonts::space_width`].
+    pub(crate) fn space_width(&self, style: Style, size: f32) -> f32 {
+        self.fonts.space_width(style, size)
+    }
+
+    /// See [`Fonts::ascent`].
+    pub(crate) fn ascent(&self, style: Style, size: f32) -> f32 {
+        self.fonts.ascent(style, size)
+    }
+
+    /// See [`Fonts::descent`].
+    pub(crate) fn descent(&self, style: Style, size: f32) -> f32 {
+        self.fonts.descent(style, size)
+    }
+
+    /// See [`Fonts::cap_height`].
+    pub(crate) fn cap_height(&self, style: Style, size: f32) -> f32 {
+        self.fonts.cap_height(style, size)
+    }
+
+    /// Split `text` in `style` into the pieces to shape with one face each:
+    /// all of it in `style` when its face has every glyph, otherwise the
+    /// uncovered grapheme clusters in the first face of the
+    /// [fallback chain](Fonts::fallback_chain) that has them. What no face
+    /// has stays in `style`. The pieces are in order and cover `text`.
+    pub(crate) fn split(&self, style: Style, text: &str) -> Vec<(Style, Range<usize>)> {
+        let whole = 0..text.len();
+        if self.shape(style, text).missing(text).is_empty() {
+            return vec![(style, whole)];
+        }
+        let mut pieces = Vec::new();
+        self.cover(
+            &self.fonts.fallback_chain(style),
+            style,
+            text,
+            whole,
+            &mut pieces,
+        );
+        pieces.dedup_by(|next, piece| {
+            let same = next.0 == piece.0;
+            if same {
+                piece.1.end = next.1.end;
+            }
+            same
+        });
+        pieces
+    }
+
+    /// Append the pieces of `text[range]` to `pieces`, trying the faces of
+    /// `chain` in order and leaving what none of them has to `style`.
+    fn cover(
+        &self,
+        chain: &[Style],
+        style: Style,
+        text: &str,
+        range: Range<usize>,
+        pieces: &mut Vec<(Style, Range<usize>)>,
+    ) {
+        let Some((&face, rest)) = chain.split_first() else {
+            pieces.push((style, range));
+            return;
+        };
+        let piece = &text[range.clone()];
+        let mut covered = range.start;
+        for missing in self.shape(face, piece).missing(piece) {
+            let missing = range.start + missing.start..range.start + missing.end;
+            if covered < missing.start {
+                pieces.push((face, covered..missing.start));
+            }
+            covered = missing.end;
+            self.cover(rest, style, text, missing, pieces);
+        }
+        if covered < range.end {
+            pieces.push((face, covered..range.end));
+        }
+    }
+}
+
 /// Load the bundled test fonts (Newsreader + Fira Code from `tests/fonts`).
 /// Test scaffolding only; the library itself names no typeface.
 #[cfg(test)]
@@ -196,6 +362,35 @@ mod tests {
         let shaped = fonts.shape(Style::Regular, "Stomatopoda");
         assert_eq!(shaped.glyphs.len(), "Stomatopoda".chars().count());
         assert!(shaped.width(9.0) > 0.0);
+    }
+
+    #[test]
+    fn the_glyphs_of_a_cluster_share_its_text_range() {
+        let fonts = test_fonts();
+        // No precomposed form exists: a base glyph plus two mark glyphs.
+        let shaped = fonts.shape(Style::Regular, "x\u{301}\u{302}y");
+        let ranges: Vec<_> = shaped.glyphs.iter().map(|g| g.text_range.clone()).collect();
+        assert_eq!(ranges, [0..5, 0..5, 0..5, 5..6]);
+    }
+
+    #[test]
+    fn text_splits_over_the_faces_that_have_its_glyphs() {
+        let fonts = test_fonts();
+        let shaper = Shaper::new(&fonts, None);
+        assert_eq!(
+            shaper.split(Style::Regular, "plain"),
+            [(Style::Regular, 0..5)]
+        );
+        // "→" and "✓" are three bytes each; only the monospace face has them.
+        assert_eq!(
+            shaper.split(Style::Bold, "a→✓b日"),
+            [
+                (Style::Bold, 0..1),
+                (Style::Mono, 1..7),
+                (Style::Bold, 7..11),
+            ]
+        );
+        assert_eq!(shaper.split(Style::Mono, "→"), [(Style::Mono, 0..3)]);
     }
 
     #[test]
